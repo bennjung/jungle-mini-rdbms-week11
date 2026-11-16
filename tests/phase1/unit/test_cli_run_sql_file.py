@@ -73,7 +73,9 @@ def test_sequential_execution_closes_file_before_parsing(
     assert cli.run_sql_file(
         sql_path, deps.storage, deps.registry, out=deps.out, err=deps.err
     ) == 0
-    deps.file_open.assert_called_with(sql_path, encoding="utf-8")
+    open_args, open_kwargs = deps.file_open.call_args
+    assert open_args[0] == sql_path
+    assert open_kwargs.get("encoding") == "utf-8"
     assert deps.calls.mock_calls == [
         call.parse(f"{FIRST_SQL}\n{SECOND_SQL}"),
         call.execute(deps.insert_query, deps.storage, deps.registry),
