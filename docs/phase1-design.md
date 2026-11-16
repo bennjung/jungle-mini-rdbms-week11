@@ -2,6 +2,9 @@
 
 본 문서는 [`phase1-requirements.md`](./phase1-requirements.md)의 확정된 요구사항을 바탕으로 **3인 병렬 개발을 위한 탑다운 아키텍처, 역할 분담, 파일 레이아웃, 그리고 파트 간 함수 I/O 계약**을 정의합니다.
 
+A·D의 상세 흐름, 합의된 결정 및 미결 사항은 [`phase1-ad-design.md`](./phase1-ad-design.md)에 기록합니다.
+SQL 형식 문법과 예시 검토 초안은 [`phase1-sql-grammar.md`](./phase1-sql-grammar.md)를 참고합니다.
+
 ---
 
 ## 1. 전체 계층 및 함수 플로우 다이어그램
@@ -16,9 +19,7 @@ flowchart TD
     end
 
     subgraph PartA["Part A: SQL 파서 (parser.py)"]
-        SPLIT["split_statements(sql_text) -> list[str]"]
-        PARSE["parse_statement(sql) -> InsertQuery | SelectQuery"]
-        SPLIT -->|"문장 1개씩 순차 전달"| PARSE
+        PARSE["parse_queries(sql_text) -> Iterator[Query]"]
     end
 
     subgraph PartB["Part B: 실행기 & 타입 (executor.py, type_registry.py)"]
@@ -44,7 +45,8 @@ flowchart TD
         READ <-->|"원시 셀(raw, quoted) 읽기"| FILES
     end
 
-    RUN -->|"2. 전체 SQL 텍스트"| SPLIT
+    RUN -->|"2. 전체 SQL 텍스트로 반복자 생성 · 쿼리별 요청"| PARSE
+    OUT -->|"출력 완료 후 D가 다음 쿼리 요청"| PARSE
     RUN -->|"3. Query 객체"| EXEC
     EXEC -->|"4a. 스키마 조회"| GSCHEMA
     EXEC -->|"4b. INSERT: ID 발급 + 행 추가"| ALLOC
@@ -82,14 +84,15 @@ mini_rdbms/
   type_interface.py                 # TypeRegistry Protocol
   parser.py                         # Part A
   type_registry.py, executor.py     # Part B
-  storage.py, formatter.py, cli.py  # Part C + D
+  storage.py                        # Part C
+  formatter.py, cli.py               # Part D
 ```
 
 | 담당 | 파트 | 소유 파일 | 주요 책임 |
 |---|---|---|---|
-| **담당 1** | **A. SQL 파서** | `mini_rdbms/parser.py` | `split_statements`, `parse_statement` |
+| **찬** | **A + D. SQL 파서 & CLI/포맷터** | `mini_rdbms/parser.py`, `mini_rdbms/formatter.py`, `mini_rdbms/cli.py`, `main.py` | `parse_queries`, `format_result`, `run_sql_file`, `main` |
 | **담당 2** | **B. 타입 & 실행기** | `mini_rdbms/type_registry.py`, `mini_rdbms/executor.py` | `DefaultTypeRegistry`, `execute_query` |
-| **담당 3** | **C + D. 스토리지 & CLI/포맷터** | `mini_rdbms/storage.py`, `mini_rdbms/formatter.py`, `mini_rdbms/cli.py`, `main.py`, `data/*` | `CsvTableStorage`, `format_result`, `run_sql_file`, `main`, 시드 메타/CSV |
+| **담당 3** | **C. 스토리지 & 메타** | `mini_rdbms/storage.py`, `data/*` | `CsvTableStorage`, 시드 메타/CSV |
 
 ---
 
@@ -191,21 +194,28 @@ class StorageError(MiniRDBMSError): ...
 
 ### 5.1 Part A (`mini_rdbms/parser.py`)
 ```python
-def split_statements(sql_text: str) -> list[str]:
+from collections.abc import Iterator
+
+def parse_queries(sql_text: str) -> Iterator[Query]:
     """
     - 입력: SQL 파일 전체 문자열
-    - 출력: ';' 기준으로 분리된 개별 SQL 문장 리스트 (문자열 '...' 안의 ';'는 무시)
-    - 예외(SqlSyntaxError): 닫히지 않은 따옴표, ';' 누락, 빈 문장('; ;'), 주석('--', '/* */')
-    """
-
-def parse_statement(sql: str) -> Query:
-    """
-    - 입력: 단일 SQL 문장 1개
-    - 출력: InsertQuery | SelectQuery (SELECT * 이면 columns=None)
-    - 예외(SqlSyntaxError): 미지원 문법(컬럼 지정 INSERT, UPDATE, OR, JOIN 등)
+    - 출력: 요청 시 다음 문장을 분석해 Query 하나를 전달하는 반복자
+    - 뒤쪽 문장은 미리 분석하지 않으며 해당 문장 요청 시 문법 오류를 발생시킨다.
+    - 빈 입력·공백·빈 문장은 건너뛰고 문자열 내부의 ';'는 구분자가 아니다.
+    - SQL 요소 사이에 스페이스·탭·줄바꿈을 허용한다. 인접한 단어 사이에는 공백이 하나 이상 필요하다.
+    - 이름과 키워드 사이에도 공백이 하나 이상 필요하다.
+    - 큰따옴표 이름 및 작은따옴표 문자열 값 내부의 줄바꿈은 SqlSyntaxError다.
+    - 정수 리터럴은 선택적인 '+' 또는 '-'와 숫자로 이루어지며 앞자리 0을 허용한다.
+    - 테이블명·컬럼명은 큰따옴표로 감싼다. 이름 안의 '""'를 큰따옴표 하나로 해석한 뒤 str.strip()으로 앞뒤 공백을 제거하여 사용하며, 그 결과가 비면 거부한다. 이름 내부 ';'는 구분자가 아니다.
+    - 닫히지 않은 따옴표, 비어 있지 않은 문장의 ';' 누락, 미지원 문법은 SqlSyntaxError.
+    - INSERT의 VALUES ()는 빈 값 목록이므로 SqlSyntaxError. 테이블에 필요한 실제 값 개수는 B가 검증한다.
+    - 주석은 지원하지 않으며 주석 문법을 별도로 인식하지 않는다.
     - 경계: 스키마/DATE 유효성/'= NULL' 의미 오류는 검사하지 않고 Part B에 위임
     """
 ```
+
+`parse_queries`는 `mini_rdbms/parser.py`에 구현되어 있으며 단위 테스트는 `tests/phase1/unit/test_parser_parse_queries.py`에 둔다.
+파서 내부에서 `_Reader`는 원문 위치와 어휘 읽기를 관리하고 `_Parser`는 문장·조건 구조를 분석한다. 전체 토큰 목록 없이 한 Query씩 처리한다.
 
 ### 5.2 Part B (`mini_rdbms/type_registry.py`, `mini_rdbms/executor.py`)
 ```python
@@ -258,6 +268,8 @@ def format_result(result: ExecutionResult) -> str:
     - SelectResult: ASCII 박스 표('+---+') + 하단 '(N row)' 또는 '(N rows)'
       - 0건이면 헤더만 있는 빈 표 + '(0 rows)'
       - None -> 'NULL', datetime.date -> 'YYYY-MM-DD'
+      - 각 열은 헤더와 변환된 값 중 가장 긴 Python 문자열 길이에 맞추고 왼쪽 정렬한다.
+      - 셀 양쪽에 공백 한 칸을 둔다. 한글 등 터미널 표시 폭에 따른 보정은 하지 않는다.
     - InsertResult: 'INSERT OK (id=<n>)'
     """
 
@@ -270,12 +282,36 @@ def run_sql_file(
     err: TextIO = sys.stderr,
 ) -> int:
     """
-    - split_statements 후 문장 1개씩 parse_statement -> execute_query -> format_result 출력
+    - SQL 파일 읽기는 CLI가 전담하며, 읽기 실패도 이 함수에서 err에 출력 후 return 1로 처리한다.
+    - UTF-8로 파일 전체를 읽고 닫은 뒤 문장 처리를 시작한다.
+    - 파일 없음·권한 부족·UTF-8 해석 실패 시 err에 출력하고 return 1. 파서·실행기는 호출하지 않는다.
+    - parse_queries의 반복자에서 Query 1개를 받아 execute_query -> format_result 출력
+    - 해당 문장의 실행·출력이 끝난 뒤에만 다음 문장을 요청한다. list(...) 등으로 미리 소비하지 않는다.
+    - 반복 중 파서 오류도 포착한다. 실패 문장 이전 정상 문장의 실행·출력은 완료되어 있어야 한다.
     - MiniRDBMSError 발생 시 err에 출력 후 즉시 return 1 (후속 문장 중단, 선행 INSERT 유지)
+    - 파일 읽기 및 문장 처리 오류는 예외 메시지 그대로 err에 출력한다.
+    - 정상 완료 시 return 0
     """
 
 def main(argv: list[str] | None = None) -> int:
     """
     - main.py에서 호출. DefaultTypeRegistry + CsvTableStorage(Path('data'), registry) 조립 후 run_sql_file 실행
+    - 객체 생성 전에 SQL 파일 경로 인자가 정확히 하나인지 확인한다.
+    - argv는 실행 파일 이름을 제외한 인자 목록이다. None이면 sys.argv[1:]을 사용한다.
+    - 인자 누락·초과 시 오류와 사용법을 표준 오류에 출력하고 return 1 (객체 생성 안 함).
+      문구: "SQL 파일 경로를 하나 지정해야 합니다."
+            "사용법: python main.py <sql_file_path>"
+    - 파일 존재·읽기 권한을 미리 검사하지 않고, 실제 읽기와 읽기 오류 처리는 run_sql_file에 맡긴다.
+    - 객체 생성 과정에서 CLI 자체 책임 범위에 해당하는 오류는 이 함수에서 오류 출력 후 return 1로 처리한다.
+    - run_sql_file의 반환값을 그대로 반환한다 (정상 0, 오류 1).
+    - main.py는 main의 반환값을 프로그램 종료 코드로 전달한다.
     """
 ```
+
+`main` 및 `main.py`의 단위 테스트는 `tests/phase1/unit/test_cli_main.py`에 둔다.
+B·C 구현체와 `run_sql_file`은 main 단위 테스트에서 모의 객체로 대체한다.
+`run_sql_file`은 `cli.py`에 구현되어 있으며, 별도 단위 테스트는 `tests/phase1/unit/test_cli_run_sql_file.py`에 둔다.
+이 테스트는 파일 읽기·A·B·포맷터를 모의 객체로 대체해 D의 실행 순서와 중단 동작을 검증한다.
+`format_result`는 `mini_rdbms/formatter.py`에 구현되어 있으며 `tests/phase1/unit/test_formatter.py`에서 독립 검증한다.
+실제 SQL 파일 실행과 B·C 연결은 이 단위 테스트의 검증 범위가 아니다.
+테스트별 입력·기대 결과는 A·D 문서의 [main 계약](./phase1-ad-design.md#5-main-단위-테스트-계약)과 [run_sql_file 계약](./phase1-ad-design.md#6-run_sql_file-단위-테스트-계약)을 따른다.
