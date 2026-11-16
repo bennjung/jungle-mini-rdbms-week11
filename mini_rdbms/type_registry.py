@@ -98,7 +98,8 @@ class _StringHandler:
             raise StorageError("STRING cells must be quoted")
         if not isinstance(raw, str):
             raise StorageError("STRING cell must be text")
-        return raw.replace('""', '"')
+        # C restores CSV "" escapes before calling from_csv_cell.
+        return raw
 
 
 class _DateHandler:

@@ -25,7 +25,8 @@ def csv_round_trip(
         raw, quoted = "NULL", False
     elif type_name == "STRING":
         assert cell.startswith('"') and cell.endswith('"')
-        raw, quoted = cell[1:-1], True
+        # Simulate C: remove outer quotes and restore "" to ".
+        raw, quoted = cell[1:-1].replace('""', '"'), True
     else:
         raw, quoted = cell, False
 
@@ -352,8 +353,11 @@ def test_b_csv_15_date_from_unquoted_cell(registry: DefaultTypeRegistry) -> None
     assert registry.from_csv_cell("DATE", "2026-03-01", quoted=False) == date(2026, 3, 1)
 
 
-def test_b_csv_16_string_unescapes_doubled_quotes(registry: DefaultTypeRegistry) -> None:
-    assert registry.from_csv_cell("STRING", 'a""b', quoted=True) == 'a"b'
+def test_b_csv_16_string_uses_c_restored_raw(
+    registry: DefaultTypeRegistry,
+) -> None:
+    # C already restored CSV "" to "; B must not unescape it again.
+    assert registry.from_csv_cell("STRING", 'a""b', quoted=True) == 'a""b'
 
 
 def test_b_csv_17_quoted_int_is_storage_error(registry: DefaultTypeRegistry) -> None:
@@ -397,8 +401,8 @@ def test_b_csv_23_to_csv_rejects_datetime(registry: DefaultTypeRegistry) -> None
 
 @pytest.mark.parametrize(
     "value",
-    ['a"b', "a,b", "a\nb", "", "NULL"],
-    ids=["quote", "comma", "newline", "empty", "null-string"],
+    ['a"b', 'a""b', "a,b", "a\nb", "", "NULL"],
+    ids=["quote", "double-quote", "comma", "newline", "empty", "null-string"],
 )
 def test_b_csv_28_string_round_trip(
     registry: DefaultTypeRegistry,

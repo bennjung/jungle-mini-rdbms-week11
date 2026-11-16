@@ -103,13 +103,13 @@ class DefaultTypeRegistry:
 
 #### `from_csv_cell`
 
-**확정(D7):** C가 CSV 셀의 바깥 따옴표를 제거하고 `quoted` 여부를 보존해 전달한다. `raw`는 바깥 따옴표가 제거된 내부 텍스트이며, `""` escape는 아직 남아 있다. B가 `from_csv_cell`에서 `""` → `"`로 unescape한다.
+**확정(D7):** CSV escape는 B(`to_csv_cell`), unescape는 C가 소유한다. C가 바깥 따옴표를 제거하고 `""` → `"`로 복원한 `raw`와 `quoted`를 전달하며, B는 `raw`를 그대로 사용하고 다시 unescape하지 않는다. (공용 `phase1-design.md` 129줄, C-R07)
 
 | 입력 | 결과 |
 |---|---|
 | `not quoted`, `raw == "NULL"`, `nullable=True` | `None` |
 | `not quoted`, `raw == "NULL"`, `nullable=False` | `StorageError` |
-| `STRING`, `quoted=True` | `raw`의 `""`를 `"`로 unescape한 값 (빈 문자열, `"NULL"` 포함) |
+| `STRING`, `quoted=True` | `raw` 그대로 (C가 이미 `""` → `"` 복원. 빈 문자열, `"NULL"` 포함) |
 | `STRING`, `quoted=False` | `StorageError` |
 | `INT`, `quoted=False`, `"42"` | `42` |
 | `DATE`, `quoted=False`, `"2026-03-01"` | `date(2026, 3, 1)` |
@@ -351,7 +351,7 @@ class _PreparedCondition:
 | B-CSV-13 | from_csv_cell | STRING `"NULL"`, quoted=True | `"NULL"` |
 | B-CSV-14 | from_csv_cell | STRING `""`, quoted=True | `""` |
 | B-CSV-15 | from_csv_cell | DATE `"2026-03-01"`, quoted=False | `date(2026,3,1)` |
-| B-CSV-16 | from_csv_cell | STRING `a""b`, quoted=True | `a"b` |
+| B-CSV-16 | from_csv_cell | STRING `a""b`, quoted=True | `a""b` (B는 C가 복원한 raw를 그대로 사용) |
 | B-CSV-17 | from_csv_cell | INT `"42"`, quoted=True | `StorageError` |
 | B-CSV-18 | from_csv_cell | DATE `"2026-03-01"`, quoted=True | `StorageError` |
 | B-CSV-19 | from_csv_cell | INT `"abc"`, quoted=False | `StorageError` |
@@ -360,7 +360,7 @@ class _PreparedCondition:
 | B-CSV-22 | to_csv_cell | DATE `"2026-03-01"` | `TypeMismatchError` |
 | B-CSV-23 | to_csv_cell | DATE `datetime(2026,3,1)` | `TypeMismatchError` |
 
-| B-CSV-28 | round-trip | STRING `a"b`, comma, newline, `""`, `"NULL"` | 원래 값 |
+| B-CSV-28 | round-trip | STRING `a"b`, `a""b`, comma, newline, `""`, `"NULL"` | 원래 값 |
 | B-CSV-29 | round-trip | INT 42/None, DATE date/None | 원래 값 |
 | B-CSV-30 | from_csv_cell | STRING `"NULL"`, quoted=False, nullable=True | `None` |
 | B-CSV-31 | from_csv_cell | STRING `"NULL"`, quoted=False, nullable=False | `StorageError` |
@@ -430,7 +430,7 @@ class _PreparedCondition:
 | B-DI-04 | AND short-circuit: `student_id=2023001 AND status='CANCELLED'`에서 compare 4회 |
 | B-DI-05 | WHERE 타입 오류: `validate`는 호출, `read_rows`는 호출 안 함 |
 
-현재 확인된 수치: **132 passed** (contracts 5 + B 127). 테스트 ID는 115개이고, `B-T-20`, `B-C-11`, `B-S-03`, `B-CSV-28/29` 등은 parameterize되어 실제 케이스 수가 더 많다. 중복 제거로 `B-T-18/19`, `B-C-20`, `B-S-18`, `B-CSV-09/24~27` ID는 사용하지 않는다.
+현재 확인된 수치: **B 129 + contracts 5 = 134**, 전체 저장소 **238 passed** (A/C/D 테스트 포함). 테스트 ID는 115개이고, `B-T-20`, `B-C-11`, `B-S-03`, `B-CSV-28/29` 등은 parameterize되어 실제 케이스 수가 더 많다. 중복 제거로 `B-T-18/19`, `B-C-20`, `B-S-18`, `B-CSV-09/24~27` ID는 사용하지 않는다.
 
 ### 6.3 실행 순서
 
@@ -454,7 +454,7 @@ class _PreparedCondition:
 | 5 | `SELECT` 중복 컬럼 / 빈 컬럼 리스트 | **확정(D13):** 중복 허용, 빈 리스트는 `SchemaError` | B/D, 파서 |
 | 6 | `IS NULL`/`IS NOT NULL`에 non-None 리터럴 | **확정(D14):** `SqlSyntaxError`. A가 1차, B가 2차로 확인하는 이중 검사 | B/A, 테스트 |
 | 7 | `to_csv_cell`에 타입과 맞지 않는 값 | **확정(D15):** `TypeMismatchError` (B/C 계약 위반) | B/C, 테스트 |
-| 8 | C가 `from_csv_cell`에 넘기는 `raw`의 escape 상태 | **확정(D7):** 바깥 따옴표 제거, `""`는 유지. B가 unescape | B/C |
+| 8 | C가 `from_csv_cell`에 넘기는 `raw`의 escape 상태 | **확정(D7):** C가 바깥 따옴표 제거 + `""` → `"` 복원. B는 raw 그대로 사용 | B/C |
 | 9 | `id` 직접 입력 문구 | **확정(D8):** B는 값 개수 불일치(`SchemaError`), 컬럼 리스트는 A가 `SqlSyntaxError`. 공용 문서 1.7 문구는 팀 동기화 필요 | 문서 |
 | 10 | 4인 분담(C/D 분리) | `phase1-design.md`의 3인 표를 4인으로 갱신 | 문서 |
 
@@ -483,7 +483,7 @@ class _PreparedCondition:
 | D4 | `compare`는 non-NULL, 같은 타입의 두 값만 받고 `None`은 `TypeMismatchError`로 거부한다. | NULL 처리는 executor가 `IS NULL`/`IS NOT NULL`과 행 값 `None`(False)에서 먼저 수행한다. B-C-08. |
 | D5 | `STRING` 비교는 유니코드 코드 포인트 순서(대소문자 구분, 로캘 콜레이션 아님)를 쓴다. | 결정적이고 환경 독립적. 사람 친화적 사전순/콜레이션은 Phase 1 범위 밖. B-C-09/B-C-10. |
 | D6 | `IS NULL` / `IS NOT NULL`은 non-nullable 컬럼에도 허용한다. | non-nullable이면 각각 항상 `False`/`True`. 조건을 오류로 만들지 않는다. B-S-13/B-S-14. |
-| D7 | CSV escape/unescape는 B가 소유한다. C는 바깥 따옴표만 제거하고 `""` escape는 유지해 `raw`로 전달한다. | B가 `to_csv_cell`에서 escape하고 `from_csv_cell`에서 unescape한다. C는 필드 경계/바깥 따옴표만 담당. B-CSV-16. |
+| D7 | CSV escape는 B(`to_csv_cell`), unescape는 C가 소유한다. C는 바깥 따옴표를 제거하고 `""` → `"` 복원한 `raw`를 전달하며, B는 raw를 그대로 사용한다. | 공용 `phase1-design.md` 129줄, C-R07. B-CSV-16/28. |
 | D8 | `id` 직접 입력은 별도 분기 없이 값 개수 불일치(`SchemaError`)로 처리한다. 컬럼 리스트는 A가 `SqlSyntaxError`로 거부한다. | B는 `InsertQuery.values`만 받아 id 포함 여부를 알 수 없다. 에러 메시지에 id 자동 생성 안내. 공용 문서 1.7 문구는 팀 동기화 필요. |
 | D9 | `from_csv_cell`에서 INT/DATE가 `quoted=True`면 `StorageError`로 거부한다. | writer는 INT/DATE를 quote하지 않는다. quoted는 STRING 전용이며, quoted INT/DATE는 손상/외부 수정으로 본다. B-CSV-17/B-CSV-18. |
 | D10 | `from_csv_cell`에서 INT/DATE 파싱이 실패하면 `StorageError`로 거부한다. | CSV에 저장된 값이 스키마와 맞지 않는 데이터 손상. SQL 입력 오류(`TypeMismatchError`)와 구분. B-CSV-19/B-CSV-20. |
