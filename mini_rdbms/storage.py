@@ -70,6 +70,7 @@ class CsvTableStorage:
     def __init__(self, data_dir: Path | str, type_registry: TypeRegistry) -> None:
         self._data_dir = Path(data_dir)
         self._type_registry = type_registry
+        self._schemas: dict[str, TableSchema] = {}
         try:
             metadata_paths = sorted(self._data_dir.glob("*.meta.json"))
         except OSError as exc:
@@ -83,6 +84,7 @@ class CsvTableStorage:
             if "next_id" not in metadata or metadata["next_id"] < minimum_next_id:
                 metadata["next_id"] = minimum_next_id
                 self._save_metadata(table_name, metadata)
+            self._schemas[table_name] = schema
 
     def _read_metadata(self, table_name: str) -> dict[str, Any]:
         path = self._data_dir / f"{table_name}.meta.json"
@@ -168,7 +170,13 @@ class CsvTableStorage:
                     pass
 
     def get_schema(self, table_name: str) -> TableSchema:
-        return self._schema_from_metadata(table_name, self._read_metadata(table_name))
+        """Return a defensive copy of the schema validated at construction."""
+        try:
+            schema = self._schemas[table_name]
+        except KeyError as exc:
+            raise SchemaError(f"Unknown table: {table_name}") from exc
+        # ColumnSchema is immutable, but the columns list is not.
+        return TableSchema(table_name=schema.table_name, columns=list(schema.columns))
 
     def read_rows(self, table_name: str) -> list[dict[str, Any]]:
         schema = self.get_schema(table_name)
@@ -205,8 +213,8 @@ class CsvTableStorage:
         return rows
 
     def allocate_next_id(self, table_name: str) -> int:
+        self.get_schema(table_name)
         metadata = self._read_metadata(table_name)
-        self._schema_from_metadata(table_name, metadata)
         if "next_id" not in metadata:
             raise StorageError(f"next_id is missing; reinitialize storage: {table_name}")
         next_id = metadata["next_id"]

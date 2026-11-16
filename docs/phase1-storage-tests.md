@@ -17,9 +17,9 @@
 | ID | 호출 / 정확한 조건·입력 | 호출 후 기대 결과·유지 조건 |
 |---|---|---|
 | C-S01 | get_schema("students") | 컬럼 순서·타입·nullable·자동 증가 값 일치 |
-| C-S02 | students 메타 삭제 후 get_schema | SchemaError |
-| C-S03 | 메타를 `{`로 교체 후 get_schema | StorageError |
-| C-S04 | 메타 읽기에 OSError 주입 | StorageError |
+| C-S02 | 캐시에 없는 missing 테이블 get_schema | SchemaError |
+| C-S03 | students 메타를 `{`로 교체 후 객체 재생성 | StorageError |
+| C-S04 | 객체 생성 전 메타 읽기에 OSError 주입 | StorageError |
 | C-R01 | 기본 행 CSV를 read_rows | 정확한 딕셔너리 목록 반환 |
 | C-R02 | 헤더만 있는 CSV read_rows | [] |
 | C-R03 | CSV 삭제 후 read_rows | StorageError |
@@ -68,9 +68,9 @@ Mock에 정상 헤더 읽기 기능만 보강한다. `docs/phase1-design-ldc.md`
 | REG-SUP02 | supports / FLOAT, BOOLEAN, NULL, int, 빈 문자열 | 각각 정확히 False |
 | CONTRACT-SUP01 | MockTypeRegistry / SpyTypeRegistry | TypeRegistry 프로토콜 충족, supports 위임 및 응답 확인 |
 | C-SUP01 | 생성자 / students.grade 타입을 FLOAT 또는 NULL로 변경, 빈 CSV | SchemaError, 해당 메타·CSV 불변 |
-| C-SUP02 | 정상 생성 후 grade를 FLOAT 또는 NULL로 변경, get_schema | SchemaError, 파일 불변 |
-| C-SUP03 | get_schema / Spy.supports 반환을 STRING에 대해 False로 설정 | C가 Spy의 결과를 따르며 SchemaError; C 하드코딩 금지 |
-| C-SUP04 | get_schema / id.type_name=FLOAT, supports는 항상 False | StorageError (id 제약 우선) |
+| C-SUP02 | 정상 생성 후 grade를 FLOAT 또는 NULL로 변경 | 기존 get_schema는 캐시 반환, 재생성 시 SchemaError, 파일 불변 |
+| C-SUP03 | 생성자 / Spy.supports 반환을 STRING에 대해 False로 설정 | C가 Spy의 결과를 따르며 SchemaError; C 하드코딩 금지 |
+| C-SUP04 | students 메타만 탐색하도록 준비 후 재생성 / id.type_name=FLOAT, supports는 항상 False | StorageError, supports 호출 없음 (id 제약 우선) |
 | C-KEY01 | read_rows / students 기본 행, courses DATE NULL 행 | 모든 행 키 집합=스키마 컬럼, open_date 키는 None이어도 존재 |
 | C-H01 | 정상 생성 후 CSV를 다른 헤더 이름·순서, 빈 파일, 헤더 없는 RECORD, 닫히지 않은 헤더 quote, 닫는 quote 뒤 x로 각각 교체; append ROW | StorageError, CSV 바이트 불변, 직렬화/쓰기 없음 |
 | C-H02 | append / 정상 헤더 뒤 기존 행을 `broken`으로 교체 | 헤더만 읽고 추가 성공, 기존 행 재검사 없음 |
@@ -101,7 +101,7 @@ Mock에 정상 헤더 읽기 기능만 보강한다. `docs/phase1-design-ldc.md`
 | ID | 호출 / 사전 상태·입력 | 검증 시점 / 기대 결과·유지 조건 |
 |---|---|---|
 | C-M01 | 생성자 / students id.type_name을 STRING 또는 DATE로 변경 | 생성 실패 StorageError, 메타·CSV 불변 |
-| C-M02 | 생성 후 get_schema / id.type_name을 STRING으로 변경 | StorageError |
+| C-M02 | 정상 생성 후 id.type_name을 STRING으로 변경 | 기존 get_schema는 INT 유지, 재생성 시 StorageError |
 | C-M03 | 생성자 / 헤더만 있는 CSV, next_id 없음 | next_id=0 저장, 나머지 메타·CSV 유지 |
 | C-M04 | 생성자 / CSV ID 0,1,2; next_id 없음·1·2·3·7 | 생성 후 메타 next_id=3·3·3·3·7 |
 | C-M05 | 생성자 / next_id="3", True, False, -1, 1.5, null, [], {} | StorageError, 틀린 값을 자동 복구하지 않음 |
@@ -114,10 +114,35 @@ Mock에 정상 헤더 읽기 기능만 보강한다. `docs/phase1-design-ldc.md`
 | C-M12 | next_id=3에서 발급 / 쓰기·flush·fsync·replace Spy | 이벤트 순서 일치; 교체 직전 원본 3·임시 4, 반환 시 원본 4 |
 | C-M13 | 생성자 / CSV 최대 ID 2, 메타 next_id=1, replace 실패 | StorageError, 원본 메타·CSV 불변 |
 | C-M14 | 생성자 / students의 id는 INT지만 nullable=True | StorageError, students 메타·CSV 불변 |
-| C-M15 | 정상 객체 생성 후 students id.nullable=True로 변경, get_schema("students") | StorageError, 변경된 메타·CSV 불변 |
+| C-M15 | 정상 객체 생성 후 students id.nullable=True로 변경 | 기존 get_schema는 nullable=False 유지, 재생성 시 StorageError, 변경된 메타·CSV 불변 |
 
 C-M14/15는 사용자 요청으로 추가한 id NOT NULL 방어 검사다. 정상 nullable=False는 기존 C-S01,
 다른 컬럼의 nullable=True는 courses DATE/NULL 테스트가 유지 조건으로 검증한다.
+
+## 생성 시 스키마 캐시 및 복사 반환 계약 (사용자 승인)
+
+- `__init__`에서 메타 검증·CSV/next_id 정합성 처리를 끝낸 테이블의 TableSchema를
+  `self._schemas: dict[str, TableSchema]`에 저장한다.
+- `get_schema`는 캐시 조회만 수행한다. 새 TableSchema와 새 columns 리스트를 반환하고,
+  불변 ColumnSchema는 공유한다. 호출자의 리스트 변경은 캐시에 영향을 주지 않는다.
+- read_rows/append_row는 캐시 스키마를 재사용한다. 스키마 외부 수정·신규 테이블은 객체 재생성 시 반영한다.
+- allocate_next_id는 캐시로 테이블 존재를 확인한 뒤 기존처럼 메타의 next_id를 읽고 증가·저장한다.
+  스키마를 다시 변환·supports 검사하지 않는다. JSON 읽기 실패·next_id 형식 검증은 유지한다.
+- 기존 C-S02/03/04, C-M02/15, C-SUP02/03/04 변경은 새 정책에 따른 검사 시점 변경이다.
+  검증 기준·예외 종류를 완화하지 않고 초기화/재생성으로 옮긴다.
+
+| ID | 호출·사전 상태·정확한 입력 | 호출 후 기대·유지 조건 |
+|---|---|---|
+| C-CACHE01 | 생성자 / 준비된 students·courses, Path.open Spy | 메타 파일당 JSON 읽기 1회, 양쪽 스키마 조회 가능 |
+| C-CACHE02 | 정상 생성 후 모든 메타 Path.open을 assertion 실패로 대체; get_schema/read_rows/append_row 반복 | 메타 재읽기 없음, 기본 ROW 저장·조회 일치 |
+| C-CACHE03 | get_schema("students") 2회 | 같은 내용, 다른 TableSchema/columns 객체, 불변 ColumnSchema는 공유 |
+| C-CACHE04 | 반환 columns를 reverse·clear·추가 후 다시 get_schema/read_rows/append_row | 캐시 컬럼 순서 및 다른 테이블은 불변, CSV·행 결과 정상 |
+| C-CACHE05 | students.meta.json 삭제 후 기존 get_schema/read_rows | 캐시 정상 사용, 새 객체에는 students가 발견되지 않아 조회 시 SchemaError |
+| C-CACHE06 | 생성 후 스키마 department를 major로 수정하고 CSV 헤더도 변경 | 기존 캐시는 department, 새 객체는 major |
+| C-CACHE07 | 생성 후 supports를 assertion 실패로 대체, allocate_next_id 2회 및 메타 읽기 Spy | 스키마 재검증 없음, 메타 읽기 2회, 반환 0·1, 저장 next_id=2 |
+| C-CACHE08 | 생성 후 메타/CSV로 later 테이블 추가 | 기존 객체의 get/read/append/allocate는 SchemaError, 재생성 후 조회 가능 |
+
+변경 전 전체 테스트: 292개 통과. 테스트를 먼저 작성해 실패 원인을 기록하고 같은 기대값으로 구현을 검증한다.
 
 ### 변경 작업 순서
 

@@ -106,25 +106,25 @@ def test_C_S01_schema(env):
 
 
 def test_C_S02_missing_meta(env):
-    root, _, storage = env
-    (root / "students.meta.json").unlink()
+    _, _, storage = env
     with pytest.raises(SchemaError):
-        storage.get_schema("students")
+        storage.get_schema("missing")
 
 
 def test_C_S03_broken_json(env):
-    root, _, storage = env
+    root, registry, _ = env
     (root / "students.meta.json").write_text("{", encoding="utf-8")
     with pytest.raises(StorageError):
-        storage.get_schema("students")
+        CsvTableStorage(root, registry)
 
 
 @pytest.mark.parametrize("table,method", [
     ("students.meta.json", "get_schema"),  # C-S04
     ("students.csv", "read_rows"),  # C-R11
 ])
-def test_read_io_failure(env, monkeypatch, table, method):
-    _, _, storage = env
+def test_read_io_failure(prepared, monkeypatch, table, method):
+    root, registry = prepared
+    storage = CsvTableStorage(root, registry) if method == "read_rows" else None
     original = Path.open
 
     def failing_open(path, *args, **kwargs):
@@ -134,7 +134,10 @@ def test_read_io_failure(env, monkeypatch, table, method):
 
     monkeypatch.setattr(Path, "open", failing_open)
     with pytest.raises(StorageError):
-        getattr(storage, method)("students")
+        if method == "get_schema":
+            CsvTableStorage(root, registry)
+        else:
+            storage.read_rows("students")
 
 
 def test_C_R01_rows(env):
@@ -391,12 +394,13 @@ def test_C_M01_initial_id_type(prepared, type_name):
 
 
 def test_C_M02_get_schema_id_type(env):
-    root, _, storage = env
+    root, registry, storage = env
     metadata = read_meta(root)
     metadata["columns"][0]["type_name"] = "STRING"
     write_meta(root, metadata)
+    assert storage.get_schema("students").columns[0].type_name == "INT"
     with pytest.raises(StorageError):
-        storage.get_schema("students")
+        CsvTableStorage(root, registry)
 
 
 def test_C_M14_initial_nullable_id(prepared):
@@ -413,14 +417,15 @@ def test_C_M14_initial_nullable_id(prepared):
 
 
 def test_C_M15_get_schema_nullable_id(env):
-    root, _, storage = env
+    root, registry, storage = env
     metadata = read_meta(root)
     metadata["columns"][0]["nullable"] = True
     write_meta(root, metadata)
     before = (root / "students.meta.json").read_bytes()
     csv_before = (root / "students.csv").read_bytes()
+    assert storage.get_schema("students").columns[0].nullable is False
     with pytest.raises(StorageError):
-        storage.get_schema("students")
+        CsvTableStorage(root, registry)
     assert (root / "students.meta.json").read_bytes() == before
     assert (root / "students.csv").read_bytes() == csv_before
 
@@ -663,23 +668,24 @@ def test_C_SUP01_initial_unsupported_type(prepared, type_name):
 
 @pytest.mark.parametrize("type_name", ["FLOAT", "NULL"])
 def test_C_SUP02_get_schema_unsupported_type(env, type_name):
-    root, _, storage = env
+    root, registry, storage = env
     metadata = read_meta(root)
     metadata["columns"][-1]["type_name"] = type_name
     write_meta(root, metadata)
     before = (root / "students.meta.json").read_bytes()
+    assert storage.get_schema("students").columns[-1].type_name == "INT"
     with pytest.raises(SchemaError):
-        storage.get_schema("students")
+        CsvTableStorage(root, registry)
     assert (root / "students.meta.json").read_bytes() == before
     assert (root / "students.csv").read_bytes() == STUDENT_HEADER.encode()
 
 
-def test_C_SUP03_registry_is_source_of_support(env, monkeypatch):
-    _, registry, storage = env
+def test_C_SUP03_registry_is_source_of_support(prepared, monkeypatch):
+    root, registry = prepared
     supports = Mock(side_effect=lambda name: name != "STRING")
     monkeypatch.setattr(registry, "supports", supports)
     with pytest.raises(SchemaError):
-        storage.get_schema("students")
+        CsvTableStorage(root, registry)
     supports.assert_any_call("STRING")
 
 
@@ -688,10 +694,11 @@ def test_C_SUP04_id_validation_precedes_support(env, monkeypatch):
     metadata = read_meta(root)
     metadata["columns"][0]["type_name"] = "FLOAT"
     write_meta(root, metadata)
+    (root / "courses.meta.json").unlink()
     supports = Mock(return_value=False)
     monkeypatch.setattr(registry, "supports", supports)
     with pytest.raises(StorageError):
-        storage.get_schema("students")
+        CsvTableStorage(root, registry)
     supports.assert_not_called()
 
 
@@ -799,3 +806,124 @@ def test_C_H03_header_read_io_failure(env, monkeypatch):
             storage.append_row("students", ROW)
     handle.write.assert_not_called()
     assert (root / "students.csv").read_bytes() == before
+
+
+def test_C_CACHE01_initial_metadata_read_once(prepared, monkeypatch):
+    root, registry = prepared
+    original = Path.open
+    metadata_reads = []
+
+    def observe(path, *args, **kwargs):
+        if path.name.endswith(".meta.json"):
+            metadata_reads.append(path.name)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observe)
+    storage = CsvTableStorage(root, registry)
+    assert storage.get_schema("students").table_name == "students"
+    assert storage.get_schema("courses").table_name == "courses"
+    assert sorted(metadata_reads) == ["courses.meta.json", "students.meta.json"]
+
+
+def test_C_CACHE02_operations_do_not_reread_schema(env, monkeypatch):
+    root, _, storage = env
+    original = Path.open
+
+    def disallow_metadata(path, *args, **kwargs):
+        assert not path.name.endswith(".meta.json"), "must reuse cached schema"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", disallow_metadata)
+    for _ in range(2):
+        assert storage.get_schema("students").table_name == "students"
+        assert storage.read_rows("students") == []
+    storage.append_row("students", ROW)
+    assert storage.read_rows("students") == [ROW]
+    assert (root / "students.csv").read_bytes() == (STUDENT_HEADER + RECORD).encode()
+
+
+def test_C_CACHE03_schema_copy(env):
+    _, _, storage = env
+    first = storage.get_schema("students")
+    second = storage.get_schema("students")
+    assert first == second
+    assert first is not second
+    assert first.columns is not second.columns
+    assert all(left is right for left, right in zip(first.columns, second.columns))
+
+
+def test_C_CACHE04_mutating_copy_does_not_change_storage(env):
+    root, _, storage = env
+    expected = storage.get_schema("students")
+    returned = storage.get_schema("students")
+    returned.columns.reverse()
+    assert storage.get_schema("students") == expected
+    returned.columns.clear()
+    returned.columns.append(ColumnSchema("unexpected", "STRING"))
+    assert storage.get_schema("students") == expected
+    assert storage.get_schema("courses").columns[-1].name == "open_date"
+    storage.append_row("students", ROW)
+    assert storage.read_rows("students") == [ROW]
+    assert (root / "students.csv").read_bytes() == (STUDENT_HEADER + RECORD).encode()
+
+
+def test_C_CACHE05_removed_metadata_does_not_invalidate_cache(env):
+    root, registry, storage = env
+    expected = storage.get_schema("students")
+    (root / "students.meta.json").unlink()
+    assert storage.get_schema("students") == expected
+    assert storage.read_rows("students") == []
+    restarted = CsvTableStorage(root, registry)
+    with pytest.raises(SchemaError):
+        restarted.get_schema("students")
+
+
+def test_C_CACHE06_schema_changes_apply_on_restart(env):
+    root, registry, storage = env
+    metadata = read_meta(root)
+    metadata["columns"][2]["name"] = "major"
+    write_meta(root, metadata)
+    put_csv(root, "id,name,major,grade\n")
+    assert storage.get_schema("students").columns[2].name == "department"
+    restarted = CsvTableStorage(root, registry)
+    assert restarted.get_schema("students").columns[2].name == "major"
+    assert restarted.read_rows("students") == []
+
+
+def test_C_CACHE07_allocation_reads_metadata_not_schema(env, monkeypatch):
+    root, registry, storage = env
+    original = Path.open
+    metadata_reads = []
+    supports = Mock(side_effect=AssertionError("must not revalidate cached schema"))
+
+    def observe(path, *args, **kwargs):
+        if path.name.endswith(".meta.json"):
+            metadata_reads.append(path.name)
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "open", observe)
+        context.setattr(registry, "supports", supports)
+        assert storage.allocate_next_id("students") == 0
+        assert storage.allocate_next_id("students") == 1
+    supports.assert_not_called()
+    assert metadata_reads == ["students.meta.json", "students.meta.json"]
+    assert read_meta(root)["next_id"] == 2
+
+
+def test_C_CACHE08_new_table_requires_restart(env):
+    root, registry, storage = env
+    metadata = {**read_meta(root), "table_name": "later"}
+    write_meta(root, metadata, "later")
+    put_csv(root, STUDENT_HEADER, "later")
+    for call in (
+        lambda: storage.get_schema("later"),
+        lambda: storage.read_rows("later"),
+        lambda: storage.append_row("later", ROW),
+        lambda: storage.allocate_next_id("later"),
+    ):
+        with pytest.raises(SchemaError):
+            call()
+    restarted = CsvTableStorage(root, registry)
+    assert restarted.get_schema("later").table_name == "later"
+    assert restarted.read_rows("later") == []

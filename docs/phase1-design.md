@@ -40,9 +40,14 @@ flowchart TD
         ALLOC["storage.allocate_next_id(table) -> int"]
         APPEND["storage.append_row(table, row) -> None"]
         READ["storage.read_rows(table) -> list[dict]"]
+        CACHE["self._schemas: dict[str, TableSchema]"]
         FILES[("data/<table>.meta.json\ndata/<table>.csv")]
 
-        GSCHEMA <-->|"JSON 스키마 로드"| FILES
+        INIT -->|"검증·정합성 처리 후 테이블별 스키마 저장"| CACHE
+        CACHE -->|"새 TableSchema + 새 columns 리스트"| GSCHEMA
+        READ -->|"캐시 스키마 조회"| GSCHEMA
+        APPEND -->|"캐시 스키마 조회"| GSCHEMA
+        ALLOC -->|"캐시로 테이블 존재 확인"| GSCHEMA
         INIT <-->|"next_id 초기화 / 최대 ID 이하이면 복구"| FILES
         ALLOC -->|"메타 next_id + 1 저장 후 기존 번호 반환 (CSV 순회 없음)"| FILES
         APPEND -->|"CSV 레코드 추가 + LF + flush + fsync"| FILES
@@ -59,7 +64,7 @@ flowchart TD
 
     APPEND -->|"셀 직렬화 (DI)"| TOCSV
     READ -->|"셀 역직렬화 (DI)"| FROMCSV
-    GSCHEMA -->|"메타 컬럼 타입 지원 여부 검사 (DI)"| SUPPORTS
+    INIT -->|"메타 컬럼 타입 지원 여부 검사 (DI)"| SUPPORTS
 ```
 
 ### 핵심 설계 경계
@@ -68,7 +73,8 @@ flowchart TD
 3. **`next_id` 추상화:** `allocate_next_id(table_name)` 뒤에 방식을 숨긴다. 객체 생성 시 `data_dir` 직속 `*.meta.json`마다 CSV를 1회 읽고 메타의 `next_id > max(id)`를 검사한다. `next_id`가 없거나 최대 ID 이하이면 최대 ID + 1로 초기화/복구하며, 빈 테이블은 `0`부터 시작한다. 더 큰 번호는 유지한다. 이후 발급은 CSV를 순회하지 않고 메타 번호를 증가·저장한 뒤 기존 번호를 반환한다. CSV 행 저장 실패 시 증가한 메타 번호는 되돌리지 않는다.
 4. **패키지 충돌 방지:**
    - 표준 라이브러리 `types` 섀도잉을 막기 위해 B의 모듈명은 `type_registry.py`로 고정한다.
-   - `mini_rdbms/__init__.py`는 공통 계약 심볼만 노출하며 통합 전까지 동결한다. 각 파트는 본인 모듈 경로에서 직접 import한다.
+    - `mini_rdbms/__init__.py`는 공통 계약 심볼만 노출하며 통합 전까지 동결한다. 각 파트는 본인 모듈 경로에서 직접 import한다.
+5. **스키마 캐시:** 생성 시 검증한 스키마를 `self._schemas: dict[str, TableSchema]`에 저장한다. 공개 `get_schema()`는 새 `TableSchema`와 새 `columns` 리스트를 반환하며 불변 `ColumnSchema`는 공유한다. read/append는 캐시를 재사용하고 메타 JSON을 다시 읽지 않는다. 실행 중 외부 스키마 변경·테이블 추가는 객체 재생성 시에만 반영한다. ID 발급은 캐시로 테이블을 확인한 후 메타의 `next_id`를 계속 읽고 갱신한다.
 
 ---
 
@@ -128,10 +134,11 @@ mini_rdbms/
 }
 ```
   - `registrations` (`id`, `student_id`, `course_id`, `status`)와 `students` (`id`, `name`, `department`, `grade`)는 `id`만 `auto_increment: true`, 전 컬럼 `nullable: false`이다.
-  - C의 `get_schema()` 및 객체 생성 검사는 `id.type_name`이 `"INT"`가 아니거나 `id.nullable=True`이면 `StorageError`로 거부한다. 다른 컬럼의 nullable 허용은 유지하며, 자동 증가 컬럼 개수·임의 이름 컬럼의 조합 검사는 추가하지 않는다.
-  - 메타 구조·id 제약 검사를 끝낸 뒤 C는 모든 컬럼에 `TypeRegistry.supports(type_name)`를 호출한다. 지원 목록은 레지스트리의 타입 핸들러를 기준으로 하며 C에 중복 정의하지 않는다. `False`이면 `SchemaError`로 거부한다. 빈 테이블에서도 동일하게 검사하며, `"NULL"`은 지원 타입명이 아니다.
+  - C는 객체 생성 시 메타 스키마를 검증하며 `id.type_name`이 `"INT"`가 아니거나 `id.nullable=True`이면 `StorageError`로 거부한다. `get_schema()`는 검증된 캐시의 복사본만 반환한다. 다른 컬럼의 nullable 허용은 유지하며, 자동 증가 컬럼 개수·임의 이름 컬럼의 조합 검사는 추가하지 않는다.
+  - 생성 시 메타 구조·id 제약 검사를 끝낸 뒤 C는 모든 컬럼에 `TypeRegistry.supports(type_name)`를 호출한다. 지원 목록은 레지스트리의 타입 핸들러를 기준으로 하며 C에 중복 정의하지 않는다. `False`이면 `SchemaError`로 거부한다. 빈 테이블에서도 동일하게 검사하며, `"NULL"`은 지원 타입명이 아니다. 이후 get/read/append 및 ID 발급은 스키마를 재검증하지 않는다.
   - `next_id`는 bool을 제외한 0 이상의 정수다. 문자열·불리언·음수·실수·null 등 잘못된 형식은 `StorageError`이며 자동 복구하지 않는다.
   - 객체 생성은 직속 메타 파일만 대상으로 한다. CSV만 있는 파일 및 하위 디렉터리의 메타는 검사 대상이 아니다. 메타에 대응하는 CSV가 없으면 `StorageError`다.
+  - 캐시에 없는 테이블은 get/read/append/allocate 모두 `SchemaError`다. 메타 스키마를 수정·삭제해도 기존 객체의 캐시는 바뀌지 않는다. 단 ID 발급은 메타 파일을 계속 읽으므로 메타 부재·읽기 실패·잘못된 next_id를 여전히 거부한다.
   - 메타 갱신은 같은 디렉터리 임시 파일에 UTF-8 JSON 전체 기록 → `flush()` → `fsync()` → 파일 닫기 → `os.replace()` 순서다. 다른 메타 필드는 보존하며, 교체 전 쓰기 실패 시 원본은 유지한다. 실패하면 `StorageError`, 발급 중이면 ID를 반환하지 않는다.
   - 메타 교체와 CSV 추가는 하나의 트랜잭션이 아니다. 디렉터리 fsync를 통한 전원 장애 시 교체 내구성이나 여러 테이블 초기화의 원자성은 이번 계약에 추가하지 않는다.
 - **`.csv` 구조:**
@@ -274,15 +281,17 @@ class CsvTableStorage:
         # 직속 *.meta.json에서 테이블명 추출, 스키마 검증 및 CSV 최초 1회 순회.
         # next_id 없음/최대 ID 이하 -> max(id)+1 저장, 빈 테이블은 0.
         # next_id가 더 크면 유지. 잘못된 next_id 형식 또는 복구 저장 실패는 StorageError.
+        # 처리 완료한 스키마를 self._schemas[table_name]에 저장. next_id는 캐시에 포함하지 않음.
     def get_schema(self, table_name: str) -> TableSchema:
-        # 메타 JSON 없으면 SchemaError, 손상/읽기 I/O 실패 시 StorageError
-        # id.type_name != "INT" 또는 id.nullable=True면 StorageError.
-        # 구조/id 검사 후 supports=False인 컬럼은 SchemaError (빈 테이블 포함).
+        # 캐시 조회만 수행. 없는 테이블은 SchemaError.
+        # 새 TableSchema + 새 columns 리스트 반환; 불변 ColumnSchema 공유.
+        # 실행 중 메타 변경은 재생성 시 반영하며 JSON을 다시 읽지 않음.
     def read_rows(self, table_name: str) -> list[dict[str, Any]]:
         # CSV 없으면 StorageError. 헤더 이름/순서, 셀 수, CSV 문법 검증.
         # C가 CSV 이스케이프 복원 후 from_csv_cell(raw, nullable=..., quoted=...) 호출.
         # 전체 행 목록 반환. 스키마의 모든 키 보장. DATE=date, NULL=None. 헤더만 있으면 [].
     def allocate_next_id(self, table_name: str) -> int:
+        # 캐시로 테이블 존재 확인; 메타 스키마는 재검증하지 않음.
         # 메타 next_id 읽기 -> next_id+1을 임시 파일 기록/flush/fsync/교체 -> 기존 번호 반환.
         # CSV 재순회 없음. 저장 실패 시 StorageError, ID 반환 안 함.
     def append_row(self, table_name: str, row: dict[str, Any]) -> None:
