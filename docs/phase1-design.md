@@ -41,8 +41,8 @@ flowchart TD
         FILES[("data/<table>.meta.json\ndata/<table>.csv")]
 
         GSCHEMA <-->|"JSON 스키마 로드"| FILES
-        APPEND -->|"flush + fsync 1행 추가"| FILES
-        READ <-->|"원시 셀(raw, quoted) 읽기"| FILES
+        APPEND -->|"CSV 레코드 추가 + LF + flush + fsync"| FILES
+        READ <-->|"CSV 해석: 셀 내용(raw), 따옴표 여부(quoted)"| FILES
     end
 
     RUN -->|"2. 전체 SQL 텍스트로 반복자 생성 · 쿼리별 요청"| PARSE
@@ -60,7 +60,7 @@ flowchart TD
 ### 핵심 설계 경계
 1. **엔진과 출력 분리:** 실행기(B)는 ASCII 문자열을 직접 조립하지 않고 구조화된 결과(`SelectResult`, `InsertResult`)만 반환한다. CLI 출력 포맷팅은 포맷터(D)가 전담한다.
 2. **타입 핸들러 집중 (`TypeRegistry` 계약 + DI):** `INT`, `STRING`, `DATE`, `NULL`의 검증·CSV 직렬화/역직렬화·비교 연산은 `type_registry.py`(B) 한 곳에 모아 추후 타입 확장 시 파서·실행기·스토리지 수정을 최소화한다. 스토리지(C)는 `type_registry.py`를 직접 import하지 않고 공통 계약 `TypeRegistry`를 DI로 주입받는다.
-3. **`next_id` 추상화:** `allocate_next_id(table_name)` 인터페이스 뒤에 영속화 방식을 숨겨, 담당자(C)가 구현 방식(CSV 스캔 복구 vs 메타 파일 기록 등)을 독립적으로 선택·교체할 수 있다.
+3. **`next_id` 추상화:** `allocate_next_id(table_name)` 뒤에 방식을 숨긴다. 현재 합의한 구현은 CSV 전체의 최대 `id` + 1이며, 빈 테이블은 `0`부터 시작한다. 단일 프로세스에서 발급 → 저장을 순차 실행한다. 저장 실패로 번호가 비어도 허용하며, 저장되지 않은 발급 번호를 영구 기억하지 않는다.
 4. **패키지 충돌 방지:**
    - 표준 라이브러리 `types` 섀도잉을 막기 위해 B의 모듈명은 `type_registry.py`로 고정한다.
    - `mini_rdbms/__init__.py`는 공통 계약 심볼만 노출하며 통합 전까지 동결한다. 각 파트는 본인 모듈 경로에서 직접 import한다.
@@ -126,6 +126,10 @@ mini_rdbms/
   - 첫 줄은 반드시 컬럼 헤더 행(`id,title,capacity,open_date`)을 포함한다. 빈 테이블은 헤더 1줄만 존재한다.
   - `to_csv_cell`은 문자열을 항상 큰따옴표(`"..."`, 내부 `"`는 `""`)로 감싸고, `None`만 따옴표 없이 `NULL`로 직렬화한다.
   - `storage.py`는 표준 `csv.reader`의 따옴표 소실을 막기 위해 셀의 따옴표 유무(`quoted: bool`)를 보존해 `from_csv_cell(..., quoted=...)`로 전달한다.
+  - C가 CSV 바깥 큰따옴표 제거 및 내부 `""` → `"` 복원을 수행한다. `raw`는 복원된 셀 내용이고, `quoted`는 원래 셀의 따옴표 여부다. 예: `"a""b"` → `raw='a"b'`, `quoted=True`.
+  - 문자열의 실제 개행은 따옴표 안에 저장하고 그대로 복원한다. 문자 두 개 `\`와 `n`을 개행으로 변환하지 않는다. CSV 레코드는 여러 물리적 줄에 걸칠 수 있다.
+  - 메타 JSON과 CSV의 인코딩은 UTF-8이다. CSV는 `newline=""`로 열고 레코드마다 끝에 LF(`\n`)를 기록한다.
+  - `read_rows()`는 메타 컬럼 이름·순서와 CSV 헤더를 비교한다. `append_row()`에서 기존 CSV 헤더를 재검사하는 요구는 추가하지 않는다.
 
 ---
 
@@ -252,14 +256,23 @@ def execute_query(
 class CsvTableStorage:
     def __init__(self, data_dir: Path | str, type_registry: TypeRegistry) -> None: ...
     def get_schema(self, table_name: str) -> TableSchema:
-        # 테이블 없으면 SchemaError, .meta.json 손상 시 StorageError
+        # 메타 JSON 없으면 SchemaError, 손상/읽기 I/O 실패 시 StorageError
     def read_rows(self, table_name: str) -> list[dict[str, Any]]:
-        # 헤더/컬럼 수 불일치, 파싱 오류 시 StorageError
+        # CSV 없으면 StorageError. 헤더 이름/순서, 셀 수, CSV 문법 검증.
+        # C가 CSV 이스케이프 복원 후 from_csv_cell(raw, nullable=..., quoted=...) 호출.
+        # 전체 행 목록 반환. DATE=date, NULL=None. 헤더만 있으면 [].
     def allocate_next_id(self, table_name: str) -> int:
-        # 재실행 후에도 기존 최대 id + 1 연속성 보장 (구현 방식 자율)
+        # CSV 전체 최대 id + 1, 빈 테이블 0. 재실행 시 CSV에서 다시 계산.
     def append_row(self, table_name: str, row: dict[str, Any]) -> None:
-        # 스키마 키 일치 확인 -> to_csv_cell 직렬화 -> 1줄 쓰기 + flush() + os.fsync()
+        # 키 누락/추가면 SchemaError, 파일 변경 없음. 딕셔너리 키 순서는 무관.
+        # 스키마 순서로 row[column.name] 접근 -> to_csv_cell 호출.
+        # 반환된 셀을 쉼표로 연결 + LF -> 쓰기 -> flush() -> os.fsync().
+        # CSV 없으면 StorageError, 자동 생성 안 함. 파일 I/O 실패도 StorageError.
 ```
+
+Part C 테스트 계약·입력·검증 시점은 [phase1-storage-tests.md](phase1-storage-tests.md)를 따른다.
+타입 검증은 B 책임이며 C가 중복 수행하지 않는다. 테스트 CSV는 스키마에 맞는 값으로 준비한다.
+잘못된 INT·DATE 저장값의 일반 예외 변환 정책, 원자적 롤백·부분 쓰기 복구는 이번 범위에 추가하지 않는다.
 
 ### 5.4 Part D (`mini_rdbms/formatter.py`, `mini_rdbms/cli.py`, `main.py`)
 ```python
