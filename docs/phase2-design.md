@@ -553,7 +553,7 @@ append_row(table, row):
 
 ## 8. 테스트 계약 (확정)
 
-테스트 파일은 `tests/test_bplus_tree.py`(신규), `tests/test_storage.py`·`tests/test_executor.py`(추가)다. 구조 단언(T-04~T-07)은 `tree.root`로 노드에 직접 접근한다. 실행기 테스트(E-IDX-)는 `tests/fakes.py`의 `FakeStorage`에 `find_by_id` / `find_by_id_range`를 추가해 사용한다.
+테스트 파일은 `tests/test_bplus_tree.py`(신규), `tests/test_storage.py`·`tests/test_executor.py`(추가), `tests/test_persistence.py`(기능 테스트)다. 구조 단언(T-04~T-07)은 `tree.root`로 노드에 직접 접근한다. 실행기 테스트(E-IDX-)는 `tests/fakes.py`의 `FakeStorage`에 `find_by_id` / `find_by_id_range`를 추가해 사용한다.
 
 > **문서 위치 이탈 기록.** 요구사항 §8은 테스트 계약을 `docs/phase2-tests.md`로 분리하도록 지정한다. 이번 설계 세션의 지시에 따라 설계 문서 §8에 통합했고, 사용자 승인을 받았다(D-20). 별도 문서가 필요해지면 §8 전체를 그대로 옮기면 된다.
 
@@ -621,6 +621,18 @@ T-04·T-06·T-16·T-19의 구조 수치는 D-08·D-09 규칙을 그대로 적용
 | B-01 | `generate_data.py --rows 100` | INSERT 100줄 |
 | B-02 | 소규모 insert·query 실행 | JSON 필수 키 존재 |
 | B-03 | `--repeat 2` | `runs` 길이 2 |
+
+### 8.5 영속성 기능 테스트 (`P-`)
+
+`tests/test_persistence.py`는 실제 `main.py`를 **별도 프로세스**로 실행합니다. 임시 디렉터리에 스키마를 만들며 저장소의 `data/`에는 의존하지 않습니다.
+
+| ID | 조건 | 기대 |
+|---|---|---|
+| P-01 | INSERT 3건 → 프로세스 종료 → SELECT | CSV 3행, `next_id=3`, 등호·범위·비인덱스 조회 정확, 인덱스 파일 없음, 재구축 후 `node_visits >= 1` |
+| P-02 | INSERT → 재시작 → INSERT | 두 번째가 `id=1`, `next_id=2` |
+| P-03 | 한글 값 INSERT → 재시작 조회 | 값 보존 |
+| P-04 | INSERT → 검증 실패 INSERT → INSERT | 실패가 id를 소비하지 않아 다음이 `id=1` |
+| P-05 | INSERT 중 SIGKILL | 완료된 `id=0` 행 유지, 재시작 후 조회 가능 |
 
 ---
 
