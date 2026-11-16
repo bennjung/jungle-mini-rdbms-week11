@@ -1,0 +1,30 @@
+{
+  "table_name": "students",
+  "next_id": 0,
+  "columns": [
+    {
+      "name": "id",
+      "type_name": "INT",
+      "nullable": false,
+      "auto_increment": true
+    },
+    {
+      "name": "name",
+      "type_name": "STRING",
+      "nullable": false,
+      "auto_increment": false
+    },
+    {
+      "name": "department",
+      "type_name": "STRING",
+      "nullable": false,
+      "auto_increment": false
+    },
+    {
+      "name": "grade",
+      "type_name": "INT",
+      "nullable": false,
+      "auto_increment": false
+    }
+  ]
+}

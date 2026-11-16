@@ -1,0 +1,30 @@
+{
+  "table_name": "courses",
+  "next_id": 0,
+  "columns": [
+    {
+      "name": "id",
+      "type_name": "INT",
+      "nullable": false,
+      "auto_increment": true
+    },
+    {
+      "name": "title",
+      "type_name": "STRING",
+      "nullable": false,
+      "auto_increment": false
+    },
+    {
+      "name": "capacity",
+      "type_name": "INT",
+      "nullable": false,
+      "auto_increment": false
+    },
+    {
+      "name": "open_date",
+      "type_name": "DATE",
+      "nullable": true,
+      "auto_increment": false
+    }
+  ]
+}
