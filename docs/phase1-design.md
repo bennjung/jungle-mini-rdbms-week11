@@ -17,7 +17,7 @@
 
 ### 핵심 설계 경계
 1. **엔진과 출력 분리:** 실행기(B)는 ASCII 문자열을 직접 조립하지 않고 구조화된 결과(`SelectResult`, `InsertResult`)만 반환한다. CLI 출력 포맷팅은 포맷터(D)가 전담한다.
-2. **타입 핸들러 집중:** `INT`, `STRING`, `DATE`, `NULL`의 검증·CSV 직렬화/역직렬화·비교 연산은 타입 핸들러/레지스트리 계층 한 곳에 모아 추후 타입 확장 시 파서·실행기 수정을 최소화한다.
+2. **타입 핸들러 집중 (`TypeRegistry` 계약 + DI):** `INT`, `STRING`, `DATE`, `NULL`의 검증·CSV 직렬화/역직렬화·비교 연산은 타입 핸들러/레지스트리 계층 한 곳에 모아 추후 타입 확장 시 파서·실행기·스토리지 수정을 최소화한다. 스토리지(C)는 `types.py` 구현을 직접 import하지 않고 공통 계약 `TypeRegistry`를 의존성 주입(DI)으로 받아 사용한다.
 3. **`next_id` 추상화:** `allocate_next_id(table_name)` 인터페이스 뒤에 영속화 방식을 숨겨, 담당자(C)가 구현 방식(CSV 스캔 복구 vs 메타 파일 기록 등)을 독립적으로 선택·교체할 수 있다.
 
 ---
@@ -27,14 +27,14 @@
 | 담당 | 파트 | 소유 모듈(예시) | 주요 책임 | 독립 단위 테스트 범위 |
 |---|---|---|---|---|
 | **담당 1** | **A. SQL 파서** | `parser.py` | 토크나이징, `;` 문장 분리, `INSERT`/`SELECT`/`WHERE` 구문 분석, `InsertQuery`/`SelectQuery` 생성 | `''` 이스케이프, 음수 정수, 키워드 대소문자, 잘못된 문법(`SqlSyntaxError`) |
-| **담당 2** | **B. 타입 & 실행기** | `types.py`, `executor.py` | 타입별 검증·비교(`INT`, `STRING`, `DATE`, `NULL`), 스키마 대조, `WHERE` 평가(`AND`, `IS NULL`, `IS NOT NULL`), `INSERT`/`SELECT` 실행 | Mock `TableStorage` 기반 타입 불일치(`TypeMismatchError`), `NULL` 일반 비교 오류, `DATE` `'YYYY-MM-DD'` 엄격 검증, 스키마 오류(`SchemaError`) |
-| **담당 3** | **C + D. 스토리지 & CLI/포맷터** | `storage.py`, `formatter.py`, `cli.py` | `data/<table>.meta.json` 로드, `data/<table>.csv` 읽기/쓰기(`flush`+`fsync`), `NULL` vs `"NULL"` CSV 구분, `next_id` 영속화, CLI 실행·중단 정책, ASCII 표 렌더링 | 재실행 후 `next_id` 연속성, CSV 라운드트립 및 손상 라인 감지(`StorageError`), ASCII 표(0건 포함), 중간 오류 시 후속 문장 중단 |
+| **담당 2** | **B. 타입 & 실행기** | `types.py`, `executor.py` | `TypeRegistry` 구현(`INT`, `STRING`, `DATE`, `NULL` 검증·비교·CSV 셀 변환), 스키마 대조, `WHERE` 평가(`AND`, `IS NULL`, `IS NOT NULL`), `INSERT`/`SELECT` 실행 | Mock `TableStorage` 기반 타입 불일치(`TypeMismatchError`), `NULL` 일반 비교 오류, `DATE` `'YYYY-MM-DD'` 엄격 검증, 스키마 오류(`SchemaError`) |
+| **담당 3** | **C + D. 스토리지 & CLI/포맷터** | `storage.py`, `formatter.py`, `cli.py` | `data/<table>.meta.json` 로드, `data/<table>.csv` 읽기/쓰기(`flush`+`fsync`, `TypeRegistry` DI 사용), `NULL` vs `"NULL"` CSV 구분, `next_id` 영속화, CLI 실행·중단 정책, ASCII 표 렌더링 | Mock `TypeRegistry` 기반 재실행 후 `next_id` 연속성, CSV 라운드트립 및 손상 라인 감지(`StorageError`), ASCII 표(0건 포함), 중간 오류 시 후속 문장 중단 |
 
 ---
 
 ## 3. 모듈 간 경계 계약 (공통 인터페이스)
 
-> 아래 계약 파일(`models.py`, `errors.py`, `storage_interface.py`)을 먼저 맞춘 뒤 각 파트가 독립 개발한다. 각 모듈 내부의 자료구조와 구현 방식은 담당자가 자율적으로 결정한다.
+> 아래 계약 파일(`models.py`, `errors.py`, `storage_interface.py`, `type_interface.py`)을 먼저 맞춘 뒤 각 파트가 독립 개발한다. 각 모듈 내부의 자료구조와 구현 방식은 담당자가 자율적으로 결정한다.
 
 ### 3.1 파서(A) → 실행기(B): 최소 `dataclass` 2개
 
@@ -112,4 +112,17 @@ class SqlSyntaxError(MiniRDBMSError): ...     # A: 토크나이징/문법 오류
 class SchemaError(MiniRDBMSError): ...        # B/C: 없는 테이블/컬럼, 값 개수 불일치, id 직접 입력 시도
 class TypeMismatchError(MiniRDBMSError): ...  # B: INSERT/WHERE 타입 불일치, 잘못된 DATE, NULL 일반 비교
 class StorageError(MiniRDBMSError): ...       # C/D: 파일 입출력 오류, 손상된 CSV/메타데이터
+```
+
+### 3.4 타입 핸들러(B) ↔ 스토리지(C) / 실행기(B): `TypeRegistry` 추상 계약
+
+```python
+from typing import Any, Protocol, runtime_checkable
+
+@runtime_checkable
+class TypeRegistry(Protocol):
+    def validate(self, type_name: str, value: Any, *, nullable: bool = False) -> Any: ...
+    def compare(self, type_name: str, left: Any, op: str, right: Any) -> bool: ...
+    def to_csv_cell(self, type_name: str, value: Any) -> str: ...
+    def from_csv_cell(self, type_name: str, raw: str, *, nullable: bool = False) -> Any: ...
 ```

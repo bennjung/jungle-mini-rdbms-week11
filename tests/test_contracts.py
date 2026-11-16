@@ -18,6 +18,7 @@ from mini_rdbms import (
     TableSchema,
     TableStorage,
     TypeMismatchError,
+    TypeRegistry,
 )
 
 
@@ -110,3 +111,34 @@ def test_table_storage_protocol_contract() -> None:
 
     with pytest.raises(SchemaError):
         storage.get_schema("nonexistent")
+
+
+class MockTypeRegistry:
+    """Minimal mock implementation verifying TypeRegistry contract for Part C."""
+
+    def validate(self, type_name: str, value: Any, *, nullable: bool = False) -> Any:
+        return value
+
+    def compare(self, type_name: str, left: Any, op: str, right: Any) -> bool:
+        return left == right
+
+    def to_csv_cell(self, type_name: str, value: Any) -> str:
+        return "NULL" if value is None else str(value)
+
+    def from_csv_cell(
+        self, type_name: str, raw: str, *, nullable: bool = False
+    ) -> Any:
+        if nullable and raw == "NULL":
+            return None
+        return int(raw) if type_name == "INT" else raw
+
+
+def test_type_registry_protocol_contract() -> None:
+    registry = MockTypeRegistry()
+
+    assert isinstance(registry, TypeRegistry)
+    assert registry.validate("INT", 42) == 42
+    assert registry.compare("INT", 42, "=", 42) is True
+    assert registry.to_csv_cell("INT", None) == "NULL"
+    assert registry.from_csv_cell("INT", "42") == 42
+    assert registry.from_csv_cell("DATE", "NULL", nullable=True) is None

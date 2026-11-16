@@ -19,6 +19,7 @@ from .models import (
     WhereCondition,
 )
 from .storage_interface import TableStorage
+from .type_interface import TypeRegistry
 
 __all__ = [
     "MiniRDBMSError",
@@ -36,4 +37,5 @@ __all__ = [
     "InsertResult",
     "ExecutionResult",
     "TableStorage",
+    "TypeRegistry",
 ]
