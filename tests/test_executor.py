@@ -41,6 +41,7 @@ def make_storage(
     append_error: Exception | None = None,
     allocate_error: Exception | None = None,
     schema_error: Exception | None = None,
+    lookup_visits: int = 1,
     call_log: list[tuple] | None = None,
 ) -> FakeStorage:
     if rows is None:
@@ -59,6 +60,7 @@ def make_storage(
         append_error=append_error,
         allocate_error=allocate_error,
         schema_error=schema_error,
+        lookup_visits=lookup_visits,
         call_log=call_log,
     )
 
@@ -901,3 +903,163 @@ def test_b_di_05_where_type_error_does_not_read_rows(
         tag == "storage" and method == "read_rows"
         for tag, method, *_ in call_log
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 인덱스 경로 (E-IDX-), 근거: docs/phase2-design.md §4.1, §8.3
+# ---------------------------------------------------------------------------
+
+def test_E_IDX_01_equality_uses_point_lookup(registry) -> None:
+    storage = make_storage()
+
+    result = run_select(
+        storage, registry, "registrations", where=[("id", "=", 2)]
+    )
+
+    assert result == SelectResult(
+        columns=["id", "student_id", "course_id", "status"],
+        rows=[[2, 2023002, 101, "APPLIED"]],
+    )
+    assert "read_rows" not in storage.method_names()
+    assert storage.index_lookups == [("registrations", 2)]
+
+
+def test_E_IDX_02_range_normalizes_half_open_bounds(registry) -> None:
+    storage = make_storage()
+
+    result = run_select(
+        storage,
+        registry,
+        "registrations",
+        where=[("id", ">=", 1), ("id", "<", 3)],
+    )
+
+    assert [row[0] for row in result.rows] == [1, 2]
+    assert storage.range_lookups == [("registrations", 1, 3)]
+    assert "read_rows" not in storage.method_names()
+
+
+def test_E_IDX_03_greater_than_excludes_bound(registry) -> None:
+    storage = make_storage()
+
+    result = run_select(
+        storage, registry, "registrations", where=[("id", ">", 1)]
+    )
+
+    assert [row[0] for row in result.rows] == [2, 3]
+    assert storage.range_lookups == [("registrations", 2, None)]
+
+
+def test_E_IDX_04_less_or_equal_expands_upper_bound(registry) -> None:
+    storage = make_storage()
+
+    result = run_select(
+        storage, registry, "registrations", where=[("id", "<=", 2)]
+    )
+
+    assert [row[0] for row in result.rows] == [1, 2]
+    assert storage.range_lookups == [("registrations", None, 3)]
+
+
+def test_E_IDX_05_multiple_id_conditions_intersect(registry) -> None:
+    storage = make_storage()
+
+    result = run_select(
+        storage,
+        registry,
+        "registrations",
+        where=[("id", ">=", 2), ("id", ">", 1)],
+    )
+
+    assert [row[0] for row in result.rows] == [2, 3]
+    assert storage.range_lookups == [("registrations", 2, None)]
+
+
+def test_E_IDX_06_residual_condition_filters_candidates(registry) -> None:
+    applied = make_storage()
+    kept = run_select(
+        applied,
+        registry,
+        "registrations",
+        where=[("id", "=", 2), ("status", "=", "APPLIED")],
+    )
+    assert kept.rows == [[2, 2023002, 101, "APPLIED"]]
+    assert applied.index_lookups == [("registrations", 2)]
+
+    cancelled = make_storage()
+    dropped = run_select(
+        cancelled,
+        registry,
+        "registrations",
+        where=[("id", "=", 2), ("status", "=", "CANCELLED")],
+    )
+    assert dropped.rows == []
+    assert cancelled.index_lookups == [("registrations", 2)]
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        [("id", "!=", 2)],
+        [("id", "IS NULL", None)],
+        [("id", "IS NOT NULL", None)],
+        [],
+    ],
+    ids=["not-equal", "is-null", "is-not-null", "no-condition"],
+)
+def test_E_IDX_07_fallback_path_reads_all_rows(registry, where) -> None:
+    storage = make_storage()
+
+    run_select(storage, registry, "registrations", where=where)
+
+    assert "read_rows" in storage.method_names()
+    assert storage.index_lookups == []
+    assert storage.range_lookups == []
+
+
+def test_E_IDX_08_empty_interval_skips_storage(registry) -> None:
+    storage = make_storage()
+
+    result = run_select(
+        storage,
+        registry,
+        "registrations",
+        where=[("id", ">", 5), ("id", "<", 6)],
+    )
+
+    assert result.rows == []
+    assert storage.method_names() == ["get_schema"]
+
+
+def test_E_IDX_09_trace_reports_path_and_counts(registry) -> None:
+    from mini_rdbms.executor import QueryTrace
+
+    storage = make_storage(lookup_visits=3)
+    trace = QueryTrace()
+
+    result = execute_query(
+        SelectQuery(
+            table="registrations", columns=None, where=[("id", "=", 2)]
+        ),
+        storage,
+        registry,
+        trace=trace,
+    )
+
+    assert trace.path == "index"
+    assert trace.node_visits == 3
+    assert trace.records_read == 1
+    assert len(result.rows) == 1
+
+
+def test_E_IDX_10_trace_is_optional(registry) -> None:
+    from mini_rdbms.executor import QueryTrace
+
+    query = SelectQuery(
+        table="registrations", columns=None, where=[("id", "=", 2)]
+    )
+
+    without_trace = execute_query(query, make_storage(), registry)
+    with_trace = execute_query(query, make_storage(), registry, trace=QueryTrace())
+
+    assert without_trace == with_trace

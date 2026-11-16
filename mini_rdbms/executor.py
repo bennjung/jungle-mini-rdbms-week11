@@ -1,4 +1,4 @@
-"""Phase 1 query executor for INSERT and SELECT."""
+"""Phase 1 query executor for INSERT and SELECT (Phase 2 id index path)."""
 
 from __future__ import annotations
 
@@ -21,6 +21,16 @@ from .type_interface import TypeRegistry
 
 _COMPARISON_OPS = {"=", "!=", "<", "<=", ">", ">="}
 _NULL_OPS = {"IS NULL", "IS NOT NULL"}
+_INDEX_COLUMN = "id"
+
+
+@dataclass(slots=True)
+class QueryTrace:
+    """Per-query execution statistics filled in by execute_query."""
+
+    path: str = ""
+    node_visits: int = 0
+    records_read: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,12 +44,14 @@ def execute_query(
     query: Query,
     storage: TableStorage,
     type_registry: TypeRegistry,
+    *,
+    trace: QueryTrace | None = None,
 ) -> ExecutionResult:
-    """Execute one parsed Phase 1 query."""
+    """Execute one parsed query."""
     if isinstance(query, InsertQuery):
         return _execute_insert(query, storage, type_registry)
     if isinstance(query, SelectQuery):
-        return _execute_select(query, storage, type_registry)
+        return _execute_select(query, storage, type_registry, trace)
     raise TypeError(f"Unsupported query type: {type(query).__name__}")
 
 
@@ -80,22 +92,93 @@ def _execute_select(
     query: SelectQuery,
     storage: TableStorage,
     type_registry: TypeRegistry,
+    trace: QueryTrace | None = None,
 ) -> SelectResult:
     schema = storage.get_schema(query.table)
     output_columns = _resolve_output_columns(schema, query.columns)
     prepared_where = _prepare_where(schema, query.where, type_registry)
+    column_names = [column.name for column in output_columns]
 
-    rows = storage.read_rows(query.table)
+    interval = _id_interval(schema, prepared_where)
+    if interval is None:
+        rows = storage.read_rows(query.table)
+        result_rows = [
+            [row[column.name] for column in output_columns]
+            for row in rows
+            if _matches(row, prepared_where, type_registry)
+        ]
+        if trace is not None:
+            trace.path = "linear" if prepared_where else "full_scan"
+            trace.node_visits = 0
+            trace.records_read = len(rows)
+        return SelectResult(columns=column_names, rows=result_rows)
+
+    lower, upper = interval
+    if lower is not None and upper is not None and lower >= upper:
+        if trace is not None:
+            trace.path = "range"
+            trace.node_visits = 0
+            trace.records_read = 0
+        return SelectResult(columns=column_names, rows=[])
+
+    if lower is not None and upper is not None and upper == lower + 1:
+        lookup = storage.find_by_id(query.table, lower)
+        path = "index"
+    else:
+        lookup = storage.find_by_id_range(query.table, lower, upper)
+        path = "range"
+
+    candidates = lookup.rows
     result_rows = [
         [row[column.name] for column in output_columns]
-        for row in rows
+        for row in candidates
         if _matches(row, prepared_where, type_registry)
     ]
+    if trace is not None:
+        trace.path = path
+        trace.node_visits = lookup.node_visits
+        trace.records_read = len(candidates)
+    return SelectResult(columns=column_names, rows=result_rows)
 
-    return SelectResult(
-        columns=[column.name for column in output_columns],
-        rows=result_rows,
-    )
+
+def _id_interval(
+    schema: TableSchema,
+    prepared: list[_PreparedCondition],
+) -> tuple[int | None, int | None] | None:
+    """Return the half-open id interval [lower, upper), or None for a full read."""
+    if not any(column.name == _INDEX_COLUMN for column in schema.columns):
+        return None
+
+    lower: int | None = None
+    upper: int | None = None
+    saw_id_condition = False
+
+    for condition in prepared:
+        if condition.column.name != _INDEX_COLUMN:
+            continue
+        saw_id_condition = True
+        op = condition.op
+        value = condition.literal
+
+        if op == "=":
+            lower = value if lower is None else max(lower, value)
+            upper = value + 1 if upper is None else min(upper, value + 1)
+        elif op == ">":
+            bound = value + 1
+            lower = bound if lower is None else max(lower, bound)
+        elif op == ">=":
+            lower = value if lower is None else max(lower, value)
+        elif op == "<":
+            upper = value if upper is None else min(upper, value)
+        elif op == "<=":
+            bound = value + 1
+            upper = bound if upper is None else min(upper, bound)
+        else:
+            return None
+
+    if not saw_id_condition:
+        return None
+    return lower, upper
 
 
 def _resolve_output_columns(

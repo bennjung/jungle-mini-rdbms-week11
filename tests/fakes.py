@@ -84,6 +84,8 @@ class FakeStorage:
         append_error: Exception | None = None,
         allocate_error: Exception | None = None,
         schema_error: Exception | None = None,
+        index_error: Exception | None = None,
+        lookup_visits: int = 1,
         call_log: list[tuple[Any, ...]] | None = None,
     ) -> None:
         self.schemas = schemas
@@ -93,8 +95,12 @@ class FakeStorage:
         self.append_error = append_error
         self.allocate_error = allocate_error
         self.schema_error = schema_error
+        self.index_error = index_error
+        self.lookup_visits = lookup_visits
         self.call_log = call_log
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.index_lookups: list[tuple[str, int]] = []
+        self.range_lookups: list[tuple[str, int | None, int | None]] = []
         self.appended_rows: dict[str, list[dict[str, Any]]] = {
             name: [] for name in schemas
         }
@@ -131,6 +137,36 @@ class FakeStorage:
         if self.append_error is not None:
             raise self.append_error
         self.appended_rows.setdefault(table_name, []).append(deepcopy(row))
+
+    def _lookup(self, rows: list[dict[str, Any]]):
+        from mini_rdbms.models import IndexLookupResult
+
+        return IndexLookupResult(rows=deepcopy(rows), node_visits=self.lookup_visits)
+
+    def find_by_id(self, table_name: str, record_id: int):
+        self._record("find_by_id", table_name, record_id)
+        self.index_lookups.append((table_name, record_id))
+        if self.index_error is not None:
+            raise self.index_error
+        matches = [
+            row for row in self.rows.get(table_name, []) if row.get("id") == record_id
+        ]
+        return self._lookup(matches)
+
+    def find_by_id_range(
+        self, table_name: str, lower: int | None, upper: int | None
+    ):
+        self._record("find_by_id_range", table_name, lower, upper)
+        self.range_lookups.append((table_name, lower, upper))
+        if self.index_error is not None:
+            raise self.index_error
+        matches = [
+            row
+            for row in self.rows.get(table_name, [])
+            if (lower is None or row["id"] >= lower)
+            and (upper is None or row["id"] < upper)
+        ]
+        return self._lookup(matches)
 
     def method_names(self) -> list[str]:
         return [method for method, _ in self.calls]
