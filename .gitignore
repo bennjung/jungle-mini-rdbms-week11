@@ -14,3 +14,15 @@ __pycache__/
 
 # Logs
 *.log
+
+# Local database state: only the committed seed files are tracked.
+# `data/*` (not `data/`) keeps the negations below effective.
+# 이미 추적 중인 파일의 수정은 gitignore로 숨길 수 없다.
+data/*
+!data/registrations.csv
+!data/registrations.meta.json
+!data/students.csv
+!data/students.meta.json
+!data/courses.csv
+!data/courses.meta.json
+
