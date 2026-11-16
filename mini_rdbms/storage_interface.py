@@ -1,8 +1,8 @@
-"""Phase 1 storage abstraction contract."""
+"""Phase 2 storage abstraction contract."""
 
 from typing import Any, Protocol, runtime_checkable
 
-from .models import TableSchema
+from .models import IndexLookupResult, TableSchema
 
 
 @runtime_checkable
@@ -20,3 +20,11 @@ class TableStorage(Protocol):
 
     def append_row(self, table_name: str, row: dict[str, Any]) -> None:
         """Persist a single row to table_name."""
+
+    def find_by_id(self, table_name: str, record_id: int) -> IndexLookupResult:
+        """Return the row with record_id, or no rows when it is absent."""
+
+    def find_by_id_range(
+        self, table_name: str, lower: int | None, upper: int | None
+    ) -> IndexLookupResult:
+        """Return rows whose id is in [lower, upper); None is unbounded."""

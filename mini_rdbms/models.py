@@ -62,4 +62,12 @@ class InsertResult:
     inserted_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class IndexLookupResult:
+    """Rows read through an index lookup plus the tree nodes that were visited."""
+
+    rows: list[dict[str, Any]]
+    node_visits: int
+
+
 ExecutionResult = Union[SelectResult, InsertResult]

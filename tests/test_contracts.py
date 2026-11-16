@@ -1,4 +1,4 @@
-"""Contract tests for Phase 1 shared models, errors, and TableStorage protocol."""
+"""Contract tests for Phase 1 shared models and errors."""
 
 from dataclasses import FrozenInstanceError
 from typing import Any
@@ -16,35 +16,9 @@ from mini_rdbms import (
     SqlSyntaxError,
     StorageError,
     TableSchema,
-    TableStorage,
     TypeMismatchError,
     TypeRegistry,
 )
-
-
-class InMemoryMockStorage:
-    """Minimal mock implementation verifying TableStorage contract for Part B."""
-
-    def __init__(self, schemas: dict[str, TableSchema]) -> None:
-        self._schemas = schemas
-        self._rows: dict[str, list[dict[str, Any]]] = {name: [] for name in schemas}
-        self._next_ids: dict[str, int] = {name: 1 for name in schemas}
-
-    def get_schema(self, table_name: str) -> TableSchema:
-        if table_name not in self._schemas:
-            raise SchemaError(f"Unknown table: {table_name}")
-        return self._schemas[table_name]
-
-    def read_rows(self, table_name: str) -> list[dict[str, Any]]:
-        return list(self._rows[table_name])
-
-    def allocate_next_id(self, table_name: str) -> int:
-        next_id = self._next_ids[table_name]
-        self._next_ids[table_name] += 1
-        return next_id
-
-    def append_row(self, table_name: str, row: dict[str, Any]) -> None:
-        self._rows[table_name].append(row)
 
 
 def test_query_dataclasses_contract() -> None:
@@ -90,27 +64,6 @@ def test_error_hierarchy_contract() -> None:
     for err_cls in (SqlSyntaxError, SchemaError, TypeMismatchError, StorageError):
         err = err_cls("test error")
         assert isinstance(err, MiniRDBMSError)
-
-
-def test_table_storage_protocol_contract() -> None:
-    schema = TableSchema(
-        table_name="registrations",
-        columns=[
-            ColumnSchema(name="id", type_name="INT", auto_increment=True),
-            ColumnSchema(name="student_id", type_name="INT"),
-        ],
-    )
-    storage = InMemoryMockStorage({"registrations": schema})
-
-    assert isinstance(storage, TableStorage)
-    assert storage.get_schema("registrations") == schema
-    row_id = storage.allocate_next_id("registrations")
-    assert row_id == 1
-    storage.append_row("registrations", {"id": row_id, "student_id": 2023001})
-    assert storage.read_rows("registrations") == [{"id": 1, "student_id": 2023001}]
-
-    with pytest.raises(SchemaError):
-        storage.get_schema("nonexistent")
 
 
 class MockTypeRegistry:

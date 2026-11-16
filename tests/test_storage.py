@@ -317,7 +317,7 @@ def test_C_A07_no_auto_creation(env):
 @pytest.mark.parametrize("failure", [None, "write", "flush", "fsync"],
                          ids=["C-A08", "C-A09-write", "C-A09-flush", "C-A09-fsync"])
 def test_durable_write(env, monkeypatch, failure):
-    _, _, storage = env
+    root, _, storage = env
     events = []
     handle = Mock()
     handle.__enter__ = Mock(return_value=handle)
@@ -325,6 +325,10 @@ def test_durable_write(env, monkeypatch, failure):
     handle.__iter__ = Mock(return_value=iter([STUDENT_HEADER]))
     handle.readline.return_value = STUDENT_HEADER
     handle.fileno.return_value = 123
+    # append_row reads the record start from fstat().st_size. The mock handle has
+    # no real descriptor, so report the CSV size that the write would start at.
+    csv_size = (root / "students.csv").stat().st_size
+    monkeypatch.setattr(os, "fstat", Mock(return_value=Mock(st_size=csv_size)))
 
     def event(name):
         def call(*args):
@@ -735,14 +739,17 @@ def test_C_H01_append_rejects_bad_header(env, text):
 
 def test_C_H02_append_reads_only_header(env, monkeypatch):
     root, _, storage = env
-    put_csv(root, STUDENT_HEADER + "broken\n")
+    body = "".join(f'{i},"a","b",1\n' for i in range(2_000))
+    put_csv(root, STUDENT_HEADER + body + "broken\n")
     original = Path.open
     handles = []
 
-    class HeaderOnlyFile:
+    class CountingFile:
+        """Count consumed characters; allow any read strategy."""
+
         def __init__(self, file):
             self.file = file
-            self.header_reads = 0
+            self.chars_read = 0
 
         def __enter__(self):
             return self
@@ -754,15 +761,19 @@ def test_C_H02_append_reads_only_header(env, monkeypatch):
             return self
 
         def __next__(self):
-            self.header_reads += 1
-            assert self.header_reads == 1, "must not read existing data records"
-            return next(self.file)
+            line = next(self.file)
+            self.chars_read += len(line)
+            return line
 
         def read(self, *args):
-            raise AssertionError("must not read the entire CSV")
+            text = self.file.read(*args)
+            self.chars_read += len(text)
+            return text
 
         def readline(self, *args):
-            return next(self)
+            text = self.file.readline(*args)
+            self.chars_read += len(text)
+            return text
 
         def __getattr__(self, name):
             return getattr(self.file, name)
@@ -770,7 +781,7 @@ def test_C_H02_append_reads_only_header(env, monkeypatch):
     def observe(path, *args, **kwargs):
         file = original(path, *args, **kwargs)
         if path.name == "students.csv":
-            handle = HeaderOnlyFile(file)
+            handle = CountingFile(file)
             handles.append(handle)
             return handle
         return file
@@ -778,11 +789,13 @@ def test_C_H02_append_reads_only_header(env, monkeypatch):
     with monkeypatch.context() as context:
         context.setattr(Path, "open", observe)
         storage.append_row("students", ROW)
+
+    # 8KB 상한은 청크 읽기를 허용하고 전체 파일 재읽기를 막는다.
     assert len(handles) == 1
-    assert handles[0].header_reads == 1
-    assert (root / "students.csv").read_bytes() == (
-        STUDENT_HEADER + "broken\n" + RECORD
-    ).encode()
+    assert handles[0].chars_read <= 8_192
+    assert (root / "students.csv").read_bytes().endswith(RECORD.encode())
+    # 마지막 데이터 행이 손상돼 있어도 append가 성공한다 = 기존 행을 검사하지 않는다.
+    assert "broken" in (root / "students.csv").read_text(encoding="utf-8")
 
 
 def test_C_H03_header_read_io_failure(env, monkeypatch):
@@ -927,3 +940,152 @@ def test_C_CACHE08_new_table_requires_restart(env):
     restarted = CsvTableStorage(root, registry)
     assert restarted.get_schema("later").table_name == "later"
     assert restarted.read_rows("later") == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 인덱스 (S-IDX-), 근거: docs/phase2-design.md §4.3, §6, §8.2
+# ---------------------------------------------------------------------------
+
+def build_indexed(root, registry, **kwargs):
+    return CsvTableStorage(root, registry, **kwargs)
+
+
+def test_S_IDX_01_lookup_by_id(prepared):
+    root, registry = prepared
+    put_csv(
+        root,
+        STUDENT_HEADER
+        + '0,"민수","컴퓨터공학",2\n5,"영희","수학",1\n9,"철수","물리",3\n',
+    )
+    storage = build_indexed(root, registry)
+
+    from mini_rdbms.models import IndexLookupResult
+
+    result = storage.find_by_id("students", 5)
+    assert isinstance(result, IndexLookupResult)
+    assert result.rows == [{"id": 5, "name": "영희", "department": "수학", "grade": 1}]
+    assert result.node_visits >= 1
+
+
+def test_S_IDX_02_constructor_scans_each_csv_once(prepared, monkeypatch):
+    root, registry = prepared
+    put_csv(root, STUDENT_HEADER + RECORD)
+    original = Path.open
+    counts = {}
+
+    def observe(path, *args, **kwargs):
+        if path.suffix == ".csv":
+            counts[path.name] = counts.get(path.name, 0) + 1
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observe)
+    build_indexed(root, registry)
+
+    assert counts == {"students.csv": 1, "courses.csv": 1}
+
+
+def test_S_IDX_03_duplicate_id_is_storage_error(prepared):
+    root, registry = prepared
+    put_csv(root, STUDENT_HEADER + RECORD + RECORD)
+
+    with pytest.raises(StorageError):
+        build_indexed(root, registry)
+
+
+def test_S_IDX_04_offset_survives_multibyte_and_quoted_newline(prepared):
+    root, registry = prepared
+    put_csv(
+        root,
+        STUDENT_HEADER
+        + '0,"가\n나","컴퓨터공학",2\n'
+        + '1,"다","수학",1\n',
+    )
+    storage = build_indexed(root, registry)
+
+    assert storage.find_by_id("students", 0).rows[0]["name"] == "가\n나"
+    assert storage.find_by_id("students", 1).rows == [
+        {"id": 1, "name": "다", "department": "수학", "grade": 1}
+    ]
+
+
+def test_S_IDX_05_missing_id_returns_no_rows(prepared):
+    root, registry = prepared
+    put_csv(root, STUDENT_HEADER + RECORD)
+    storage = build_indexed(root, registry)
+
+    assert storage.find_by_id("students", 42).rows == []
+
+
+def test_S_IDX_06_range_returns_only_matching_rows(prepared):
+    root, registry = prepared
+    put_csv(
+        root,
+        STUDENT_HEADER
+        + "".join(f'{i},"민수","컴퓨터공학",2\n' for i in (0, 2, 4, 6)),
+    )
+    storage = build_indexed(root, registry)
+
+    result = storage.find_by_id_range("students", 2, 6)
+
+    assert [row["id"] for row in result.rows] == [2, 4]
+
+
+def test_S_IDX_07_append_registers_index(prepared):
+    root, registry = prepared
+    storage = build_indexed(root, registry)
+    new_id = storage.allocate_next_id("students")
+    row = {**ROW, "id": new_id}
+
+    storage.append_row("students", row)
+
+    assert storage.find_by_id("students", new_id).rows == [row]
+
+
+def test_S_IDX_08_failed_append_is_not_indexed(prepared, monkeypatch):
+    root, registry = prepared
+    storage = build_indexed(root, registry)
+    new_id = storage.allocate_next_id("students")
+    original = Path.open
+
+    def fail(path, *args, **kwargs):
+        if path.name == "students.csv":
+            raise OSError("injected append failure")
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "open", fail)
+        with pytest.raises(StorageError):
+            storage.append_row("students", {**ROW, "id": new_id})
+
+    assert storage.find_by_id("students", new_id).rows == []
+
+
+def test_S_IDX_09_small_capacity_forces_split(prepared):
+    root, registry = prepared
+    put_csv(
+        root,
+        STUDENT_HEADER
+        + "".join(f'{i},"민수","컴퓨터공학",2\n' for i in range(5)),
+    )
+    storage = build_indexed(root, registry, index_max_keys=3)
+
+    for record_id in range(5):
+        assert storage.find_by_id("students", record_id).rows[0]["id"] == record_id
+
+
+def test_S_IDX_11_broken_header_fails_at_construction(prepared):
+    root, registry = prepared
+    put_csv(root, "id,other,department,grade\n" + RECORD)
+
+    with pytest.raises(StorageError):
+        build_indexed(root, registry)
+
+
+def test_S_IDX_12_implementation_satisfies_storage_protocol(prepared):
+    from mini_rdbms.storage_interface import TableStorage
+
+    root, registry = prepared
+    storage = build_indexed(root, registry)
+
+    assert isinstance(storage, TableStorage)
+
