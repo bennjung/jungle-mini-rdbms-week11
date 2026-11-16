@@ -279,7 +279,7 @@ class _PreparedCondition:
 
 `SpyTypeRegistry`는 `DefaultTypeRegistry`에 위임하면서 `validate`/`compare`/`to_csv_cell`/`from_csv_cell` 호출을 같은 `call_log`에 기록한다.
 
-### 6.2 테스트 ID (P0 보강 완료 — P1/P2 결정 전까지 동결 보류)
+### 6.2 테스트 ID (P0 보강 완료 — P1/P2 종료, P4.1 잔여만 보류)
 
 #### Type validation
 
@@ -430,7 +430,7 @@ class _PreparedCondition:
 | B-DI-04 | AND short-circuit: `student_id=2023001 AND status='CANCELLED'`에서 compare 4회 |
 | B-DI-05 | WHERE 타입 오류: `validate`는 호출, `read_rows`는 호출 안 함 |
 
-현재 확인된 수치: **B 129 + contracts 5 = 134**, 전체 저장소 **238 passed** (A/C/D 테스트 포함). 테스트 ID는 115개이고, `B-T-20`, `B-C-11`, `B-S-03`, `B-CSV-28/29` 등은 parameterize되어 실제 케이스 수가 더 많다. 중복 제거로 `B-T-18/19`, `B-C-20`, `B-S-18`, `B-CSV-09/24~27` ID는 사용하지 않는다.
+현재 확인된 수치(2026-11-16 C 커밋 `661a2b2` 기준): **B 137 + contracts 5 = 142**, C 86, A/D 64, 전체 저장소 **292 passed**. B 테스트 ID는 115개이고, `B-T-20`, `B-C-11`, `B-S-03`, `B-CSV-28/29` 등은 parameterize되어 실제 케이스 수가 더 많다. 중복 제거로 `B-T-18/19`, `B-C-20`, `B-S-18`, `B-CSV-09/24~27` ID는 사용하지 않는다. C가 추가한 `supports` 계약 테스트(REG-SUP, CONTRACT-SUP)는 C 문서에 기록되어 있다.
 
 ### 6.3 실행 순서
 
@@ -457,8 +457,9 @@ class _PreparedCondition:
 | 8 | C가 `from_csv_cell`에 넘기는 `raw`의 escape 상태 | **확정(D7):** C가 바깥 따옴표 제거 + `""` → `"` 복원. B는 raw 그대로 사용 | B/C |
 | 9 | `id` 직접 입력 문구 | **확정(D8):** B는 값 개수 불일치(`SchemaError`), 컬럼 리스트는 A가 `SqlSyntaxError`. 공용 문서 1.7 문구는 팀 동기화 필요 | 문서 |
 | 10 | 4인 분담(C/D 분리) | `phase1-design.md`의 3인 표를 4인으로 갱신 | 문서 |
+| 11 | auto_increment 임의 이름/타입 잔여 | C는 `id` 컬럼만 INT/NOT NULL 검증. auto 개수·이름·타입은 미검증(공용 문서에 명시). §10 P4.1 참조 | B/C, P4.1 |
 
-1~9번은 LDC 결정(D9, D10, D11, D12, D13, D14, D15, D7, D8)으로 확정됐다. 10번(4인 분담)만 공용 문서 동기화가 남았다.
+1~9번은 LDC 결정(D9, D10, D11, D12, D13, D14, D15, D7, D8)으로 확정됐다. C 커밋 `661a2b2`에서 P2/P3/P4.2/P4.3이 반영됐다. 10번(4인 분담)과 11번(P4.1 잔여)이 남아 있다.
 
 ---
 
@@ -478,7 +479,7 @@ class _PreparedCondition:
 | # | 결정 | 근거/영향 |
 |---|---|---|
 | D1 | WHERE 타입 검증은 `read_rows` 전에 수행한다. | 타입 오류는 데이터와 무관한 쿼리 오류. `read_rows`는 검증 통과 후 호출. B-S-08/09/21/22/23/25와 B-DI-05가 이 순서를 검증한다. |
-| D2 | `append_row` 실패 시 ID 갭을 허용한다. | append 실패는 부분 쓰기/크래시를 포함할 수 있어 ID 재사용은 중복 위험. Phase 1은 트랜잭션 없음. B-I-07은 `StorageError` 전파만 검증한다. |
+| D2 | `append_row` 실패 시 ID 갭을 허용한다. | append 실패는 부분 쓰기/크래시를 포함할 수 있어 ID 재사용은 중복 위험. Phase 1은 트랜잭션 없음. C는 allocate 시 메타 `next_id`를 먼저 저장하므로 append 실패 후 갭이 남는다(C-M10). B-I-07은 `StorageError` 전파만 검증한다. |
 | D3 | `validate` DATE는 `str`만 받고 `date` 객체는 `TypeMismatchError`로 거부한다. | DATE 객체는 `validate` 이후의 내부 정규화 값. `from_csv_cell`은 raw를 직접 파싱한다. B-T-15. |
 | D4 | `compare`는 non-NULL, 같은 타입의 두 값만 받고 `None`은 `TypeMismatchError`로 거부한다. | NULL 처리는 executor가 `IS NULL`/`IS NOT NULL`과 행 값 `None`(False)에서 먼저 수행한다. B-C-08. |
 | D5 | `STRING` 비교는 유니코드 코드 포인트 순서(대소문자 구분, 로캘 콜레이션 아님)를 쓴다. | 결정적이고 환경 독립적. 사람 친화적 사전순/콜레이션은 Phase 1 범위 밖. B-C-09/B-C-10. |
@@ -487,22 +488,23 @@ class _PreparedCondition:
 | D8 | `id` 직접 입력은 별도 분기 없이 값 개수 불일치(`SchemaError`)로 처리한다. 컬럼 리스트는 A가 `SqlSyntaxError`로 거부한다. | B는 `InsertQuery.values`만 받아 id 포함 여부를 알 수 없다. 에러 메시지에 id 자동 생성 안내. 공용 문서 1.7 문구는 팀 동기화 필요. |
 | D9 | `from_csv_cell`에서 INT/DATE가 `quoted=True`면 `StorageError`로 거부한다. | writer는 INT/DATE를 quote하지 않는다. quoted는 STRING 전용이며, quoted INT/DATE는 손상/외부 수정으로 본다. B-CSV-17/B-CSV-18. |
 | D10 | `from_csv_cell`에서 INT/DATE 파싱이 실패하면 `StorageError`로 거부한다. | CSV에 저장된 값이 스키마와 맞지 않는 데이터 손상. SQL 입력 오류(`TypeMismatchError`)와 구분. B-CSV-19/B-CSV-20. |
-| D11 | 레지스트리가 모르는 `type_name`은 `SchemaError`로 거부한다. | 문자열 타입 이름 자체가 지원 대상이 아님. JSON 구조 오류/비문자열 type_name은 C의 메타 검증에서 StorageError로 처리. B-T-16. |
-| D12 | auto_increment 컬럼이 정확히 1개가 아니면 `SchemaError`로 거부한다. | `allocate_next_id`가 ID 하나를 반환하고 `InsertResult.inserted_id`도 하나. 0개면 돌려줄 ID가 없고, 2개 이상이면 ID 하나로 채울 수 없다. B-I-08/B-I-09. |
+| D11 | 레지스트리가 모르는 `type_name`은 `SchemaError`로 거부한다. | 문자열 타입 이름 자체가 지원 대상이 아님. JSON 구조 오류/비문자열 type_name은 C의 메타 검증에서 StorageError로 처리. C는 `supports`로 스키마 로드 시 검증하고(빈 테이블 포함), B도 값 사용 시 SchemaError. B-T-16. |
+| D12 | auto_increment 컬럼이 정확히 1개가 아니면 `SchemaError`로 거부한다. | `allocate_next_id`가 ID 하나를 반환하고 `InsertResult.inserted_id`도 하나. 0개면 돌려줄 ID가 없고, 2개 이상이면 ID 하나로 채울 수 없다. B-I-08/B-I-09. C는 auto 개수를 검증하지 않으므로 SELECT는 통과하고 INSERT에서만 B가 거부한다. |
 | D13 | `SELECT` 중복 컬럼은 허용하고, 빈 컬럼 리스트는 `SchemaError`로 거부한다. | SQL은 중복 출력 컬럼을 허용. 빈 리스트는 parser가 `SqlSyntaxError`로 거부해야 하지만 B도 방어. B-S-15/B-S-16. |
 | D14 | `IS NULL`/`IS NOT NULL`에 non-None 리터럴이 오면 `SqlSyntaxError`로 거부한다. | **이중 검사:** A가 1차로 `IS NULL 5`를 문법 오류로 거부하고, B가 잘못된 Query가 들어온 경우를 대비해 2차로 확인. B-S-17. |
 | D15 | `to_csv_cell`에 타입과 맞지 않는 값이 오면 `TypeMismatchError`로 거부한다. | B/C 사이 typed 값 계약 위반. 파일 I/O/CSV 손상(`StorageError`)과 구분. B-CSV-21/B-CSV-22. |
 | D16 | DATE 값은 정확히 `datetime.date`만 허용하고 `datetime.datetime` 서브클래스는 `TypeMismatchError`로 거부한다. | `datetime`은 `date`의 서브클래스라 `isinstance`만으로는 통과. `compare`에서 `TypeError`, `to_csv_cell`에서 시간 포함 ISO가 나가는 것을 방지. B-C-11/B-CSV-23. |
-| D17 | `type_name`을 먼저 검증하고, 유효한 타입일 때만 `None`/nullable을 처리한다. `"NULL"`은 type_name이 아니다. | unknown type이 NULL 값에 가려지지 않게 한다. D11과 일관적. `type_name`은 INT/STRING/DATE만. B-T-21~23. |
+| D17 | `type_name`을 먼저 검증하고, 유효한 타입일 때만 `None`/nullable을 처리한다. `"NULL"`은 type_name이 아니다. | unknown type이 NULL 값에 가려지지 않게 한다. D11과 일관적. `type_name`은 INT/STRING/DATE만. C는 `supports`로 스키마 로드 시 `"NULL"`을 거부한다. B-T-21~23. |
 | D18 | unquoted `NULL`은 type_name과 무관한 NULL sentinel로 먼저 처리한다. STRING의 quoted 규칙은 NULL이 아닌 셀에만 적용한다. | nullable STRING의 NULL을 표현할 수 있어야 한다. `NULL`(NULL), `"NULL"`(문자열), `""`(빈 문자열) 구분 유지. B-CSV-30/B-CSV-31. |
 | D19 | CSV INT는 ASCII `[+-]?[0-9]+`, DATE는 ASCII `[0-9]{4}-[0-9]{2}-[0-9]{2}` + 실제 날짜만 허용한다. `+42`/`042`는 허용하고 Unicode digit·compact/week DATE는 거부한다. | INT/DATE 모두 ASCII로 통일. writer canonical 형식과 호환. B-CSV-32~34. |
 | D20 | executor의 `_prepare_where`와 registry의 `compare` 모두 unsupported 연산자를 `TypeMismatchError`로 처리한다. | A안. 쿼리 계층과 타입 API의 예외를 하나로 단순화. B-C-07/B-S-27. |
 
 ---
 
-## 10. 구현 리뷰 미정 사항
+## 10. 구현 리뷰 후속 조치
 
-> 2026-11-16 B 구현/테스트 리뷰에서 발견. P1은 수정 완료(D16), P5는 확정(D19). P2~P4는 C 담당/팀 합의 전까지 미정.
+> 2026-11-16 B 구현/테스트 리뷰에서 발견. P1은 수정 완료(D16), P5는 확정(D19).
+> 2026-11-16 C 커밋 `661a2b2`에서 P2/P3/P4.2/P4.3이 C 계층에 반영됐고, P4.1은 `id` 컬럼 제약만 반영됐다. 현재 B 코드는 C 계약을 전제로 하며 추가 방어를 넣지 않았다. 방어 추가 여부는 미정이다.
 
 ### P1. DATE `datetime` 허용 (수정 완료)
 
@@ -510,111 +512,49 @@ class _PreparedCondition:
 - `datetime`과 `date` 비교 시 `TypeError`, `to_csv_cell`이 `"2026-03-01T00:00:00"`을 반환할 수 있었음.
 - **수정:** `type(value) is date`로 정확히 검사. `B-C-11`, `B-CSV-23` 추가. D16.
 
-### P2. 스키마의 unknown type 검증 책임 (미정)
+### P2. 스키마의 unknown type 검증 책임 (C 반영 완료)
 
-- **현재:** TypeRegistry는 값이 실제로 `validate`/`compare`/`to_csv_cell`/`from_csv_cell`을 거칠 때만 `SchemaError`를 낸다. `SELECT *` 대상 테이블이 비어 있으면 셀 변환이 없어서 `type_name="FLOAT"` 같은 unknown type이 통과할 수 있다.
-- **D11과의 충돌:** D11은 "unknown type → `SchemaError`"인데, 빈 테이블 `SELECT *`에서는 에러가 나지 않는다.
-- **선택지와 트레이드오프:**
-  1. **C의 `get_schema`가 검증**
-     - C가 메타 로드 시 모든 `ColumnSchema.type_name`을 확인한다. `TypeRegistry`에 `supports(type_name) -> bool`을 추가하거나, C가 지원 타입 목록을 별도로 가진다.
-     - 장점: 메타데이터 검증이 C 한 곳. 모든 쿼리가 `get_schema`를 거치므로 빠짐없이 잡힌다. B는 유효한 schema를 신뢰할 수 있어 단순해진다.
-     - 단점: 공통 `TypeRegistry` 계약에 `supports` 추가 필요. B 단위 테스트(FakeStorage)만으로는 이 검증을 보장하지 못하고 C 통합 테스트가 필요하다. 실패를 `SchemaError`로 볼지 `StorageError`로 볼지도 정해야 한다.
-  2. **B의 `execute_query`가 검증**
-     - B가 schema를 받은 직후 모든 `ColumnSchema.type_name`을 `registry.supports()`로 확인한다.
-     - 장점: B가 자기 테스트로 D11을 보장한다. C가 검증하지 않아도 빈 `SELECT *`에서 잡힌다. C 구현에 덜 의존한다.
-     - 단점: B가 매 쿼리마다 schema 전체를 순회한다. `supports` 계약 추가는 동일. C와 검증이 중복될 수 있다.
-  3. **현재 유지**
-     - unknown type은 실제로 값이 쓰일 때만 `SchemaError`.
-     - 장점: 변경 없음. B/C 계약 변경 없음.
-     - 단점: D11이 "사용 시점"으로 약해진다. 빈 `SELECT *`는 통과하고, 같은 스키마라도 데이터 유무에 따라 에러가 달라진다.
-  4. **B가 `validate(type_name, None, nullable=True)`로 probe**
-     - `supports` 없이 기존 `validate`로 타입 존재를 확인한다.
-     - 장점: 공통 계약 변경 없이 B에서 바로 구현 가능.
-     - 단점: "NULL 검증"을 타입 존재 확인에 재사용하는 hack. `validate`의 None 처리 정책이 바뀌면 probe가 깨진다. 의미가 불명확해 비추천.
-- **영향:** C/B 공통 계약, `TypeRegistry` 확장 여부, 에러 발생 시점, 빈 테이블 동작, B/C 테스트 책임.
-- **상태:** 미정. C 담당/팀 합의 필요. 현재 B 테스트에는 빈 테이블 + unknown type 케이스가 없다.
+- **문제:** TypeRegistry는 값이 실제로 `validate`/`compare`/`to_csv_cell`/`from_csv_cell`을 거칠 때만 `SchemaError`를 냈다. `SELECT *` 대상 테이블이 비어 있으면 셀 변환이 없어서 `type_name="FLOAT"` 같은 unknown type이 통과할 수 있었다.
+- **C 반영(661a2b2):** `TypeRegistry.supports(type_name) -> bool`을 추가했다. C는 메타 구조·id 제약 검사를 먼저 끝낸 뒤 모든 컬럼에 `supports`를 호출하고, `False`면 `SchemaError`로 거부한다. 생성자와 `get_schema` 모두 적용되며 빈 테이블도 예외가 아니다.
+- **확인:** `FLOAT`, `"NULL"` type_name 모두 `SchemaError`. `"NULL"`은 지원 타입명이 아니라 값/nullable 제약이다.
+- **B:** 현재 코드는 C가 반환한 schema를 전제로 한다. B의 `_handler`는 값 사용 시 여전히 `SchemaError`를 내며 D11/D17과 일관적이다.
+- **테스트:** REG-SUP01/02, CONTRACT-SUP01, C-SUP01~04.
 
-### P3. `read_rows`가 반환한 row의 컬럼 키 검증 (미정)
+### P3. `read_rows`가 반환한 row의 컬럼 키 검증 (C 반영 완료)
 
-- **현재:** B는 `row[column.name]`을 가정한다. C의 `read_rows`가 스키마의 모든 컬럼을 보장하지 않으면 `KeyError`가 난다.
-- **문제:** D는 `MiniRDBMSError`만 잡으므로 `KeyError`는 traceback이 될 수 있다. CSV가 깨졌거나 C에 버그가 있을 때 사용자에게 좋지 않은 형태로 터진다.
-- **선택지와 트레이드오프:**
-  1. **C의 `read_rows`가 검증**
-     - 헤더/스키마와 row 키·개수를 확인하고 누락/추가 키가 있으면 `StorageError`.
-     - 장점: 저장소 데이터 검증이 C 한 곳. B는 모든 키가 있다고 신뢰할 수 있고, `KeyError`가 B까지 올 일이 없다.
-     - 단점: C가 row마다 키 집합을 확인해야 한다. C 통합 테스트가 필요하고, B 단위 테스트(FakeStorage)만으로는 보장되지 않는다.
-  2. **B가 검증/감싸기**
-     - B가 `_matches`/projection 전에 필요한 키가 있는지 확인하고, 없으면 `StorageError`로 감싼다.
-     - 장점: B가 자기 테스트로 `KeyError` traceback을 막을 수 있다. C 구현에 덜 의존한다.
-     - 단점: B가 저장소 손상을 판정하는 책임을 일부 진다. C와 검증이 중복되고, row마다 키 검사 비용이 든다.
-  3. **B가 `row.get(column.name)` 사용**
-     - 누락 키를 `None`처럼 처리한다.
-     - 장점: 코드가 단순하고 traceback이 없다.
-     - 단점: 깨진 데이터를 조용히 NULL로 해석한다. `IS NULL`/일반 비교에서 잘못된 결과가 나고, 손상이 숨는다. 비추천.
-  4. **현재 유지 (`row[column.name]`)**
-     - 장점: 변경 없음, 정상 데이터에서는 가장 단순.
-     - 단점: C가 계약을 어기면 `KeyError` traceback. D의 `MiniRDBMSError` 처리 밖으로 나간다.
-- **영향:** C/B 경계, 에러 클래스/시점, D 출력, row 처리 성능.
-- **상태:** 미정. C 담당/팀 합의 필요. 잠정 추천은 1(C)이지만 확정 아님.
+- **문제:** B는 `row[column.name]`을 가정하므로, C의 `read_rows`가 스키마의 모든 컬럼 키를 보장하지 않으면 `KeyError` traceback이 날 수 있었다.
+- **C 반영(661a2b2):** `_read_rows`가 헤더 이름·순서와 셀 개수를 검사하고, 스키마의 모든 컬럼명으로 딕셔너리를 구성한다. NULL 값 컬럼도 키가 존재하며 누락 값을 조용히 NULL로 대체하지 않는다.
+- **B:** 현재 코드는 `row[column.name]`을 그대로 사용하며 C의 키 보장을 전제로 한다. 추가 방어 여부는 미정이다.
+- **테스트:** C-KEY01, C-R01~R11, C-H01~H03.
+- **남은 것:** C가 아닌 다른 `TableStorage` 구현이 키 계약을 어기면 B는 여전히 `KeyError`를 낼 수 있다. Phase 1 실제 경로는 C다.
 
-### P4. INSERT 스키마 불변식 (미정)
+### P4. INSERT 스키마 불변식 (P4.1 잔여만 미정)
 
-P4는 세 가지를 함께 다룬다. 모두 “스키마가 INSERT 계약을 만족하는가”의 문제다.
+P4는 세 가지를 함께 다룬다. 모두 “스키마가 INSERT 계약을 만족하는가”의 문제다. P4.2/P4.3은 C 커밋 `661a2b2`에서 C 계층 기준으로 닫혔고, P4.1은 `id` 컬럼 제약만 반영됐다.
 
-#### P4.1 auto_increment 컬럼의 타입/제약
+#### P4.1 auto_increment 컬럼의 타입/제약 (부분 반영)
 
-- **현재:** B는 auto_increment 컬럼이 정확히 1개인지만 확인한다. 그 컬럼의 `type_name`이 `INT`가 아니어도 B는 `new_id`(int)를 넣고, C의 `to_csv_cell`에서 `TypeMismatchError`가 난다.
-- **문제:** 스키마가 잘못된 건데 값 타입 오류처럼 보인다. `InsertResult`/`allocate_next_id` 계약상 auto 컬럼은 INT여야 한다.
-- **선택지와 트레이드오프:**
-  1. **C의 메타 검증**
-     - auto_increment 컬럼은 `INT` + `nullable=False`여야 한다고 강제. 실패 시 `SchemaError` 또는 `StorageError`.
-     - 장점: 메타 검증이 C 한 곳. 모든 INSERT가 `get_schema`를 거치므로 빠짐없이 잡힌다.
-     - 단점: C 통합 테스트 필요. `TypeRegistry`/스키마 규칙과 중복될 수 있음.
-  2. **B의 스키마 검사**
-     - B가 `_execute_insert`에서 auto 컬럼 `type_name == "INT"`와 nullable 여부를 확인하고 `SchemaError`.
-     - 장점: B 단위 테스트로 보장. C 구현에 덜 의존.
-     - 단점: B가 스키마 불변식을 일부 소유. C와 중복 가능.
-  3. **현재 유지**
-     - B는 개수만 보고, 타입 오류는 C의 `to_csv_cell`에서 늦게 난다.
-     - 장점: 변경 없음.
-     - 단점: 스키마 오류가 `TypeMismatchError`로 보이고, 실패 시점이 늦다.
+- **C 반영(661a2b2):** `id`라는 이름의 컬럼은 `type_name == "INT"`이고 `nullable=False`여야 한다. 위반 시 `StorageError` (C-M01/M02/M14/M15).
+- **C가 하지 않는 것:** auto_increment 컬럼 개수, `id`가 아닌 auto 컬럼의 이름/타입/nullable 조합 검사. 공용 문서에 “자동 증가 컬럼 개수·임의 이름 컬럼의 조합 검사는 추가하지 않는다”로 명시됐다.
+- **B:** `_execute_insert`에서 auto 컬럼이 정확히 1개인지 확인한다(D12). SELECT는 auto 개수를 확인하지 않는다.
+- **남은 동작(실제 확인):**
+  - `id` auto + `seq` auto: `get_schema`/SELECT는 통과하고 INSERT만 B가 `SchemaError`.
+  - `seq`만 auto(`id` 없음): C 생성자의 `next_id` 초기화가 `row["id"]`를 읽어 `KeyError: 'id'`.
+  - `seq`가 STRING auto: B INSERT가 C의 `to_csv_cell`까지 가서 `TypeMismatchError`.
+- **상태:** `id` 컬럼 제약은 닫힘. auto 불변식의 나머지는 미정이며, C 추가 검증 / B 검증 / 범위 밖 중 결정이 필요하다.
 
-#### P4.2 `allocate_next_id` 반환 타입
+#### P4.2 `allocate_next_id` 반환 타입 (C 반영 완료)
 
-- **현재:** B는 반환값을 그대로 `InsertResult.inserted_id`와 row의 id에 넣는다. C가 `True`를 반환하면 `InsertResult(inserted_id=True)`가 된다.
-- **문제:** 계약은 `int`. `bool`은 `int`의 서브클래스라 `isinstance(..., int)`만으로는 걸러지지 않는다.
-- **선택지와 트레이드오프:**
-  1. **C가 int를 보장**하고 B는 신뢰.
-     - 장점: B 단순. C가 ID 발급의 주체.
-     - 단점: C 버그가 B까지 전파. B 단위 테스트로는 못 잡음.
-  2. **B가 검증**
-     - `type(new_id) is int`가 아니면 `StorageError`(C 계약 위반)로 거부.
-     - 장점: 잘못된 ID가 결과/파일에 들어가는 것을 막음. B 테스트 가능.
-     - 단점: B가 C 계약을 방어. 정상 경로에서는 불필요한 검사.
-  3. **현재 유지**
-     - 장점: 변경 없음.
-     - 단점: `True`, 문자열 등이 ID로 통과할 수 있음.
+- **C 반영(661a2b2):** 메타 `next_id`는 `type(next_id) is int`이고 `0` 이상일 때만 허용한다(bool 제외). `allocate_next_id`는 이 값을 `+1` 저장한 뒤 기존 정수를 반환한다.
+- **B:** 반환값을 그대로 `InsertResult.inserted_id`와 row의 id에 넣는다. C가 int를 보장한다.
+- **남은 것:** C가 아닌 다른 `TableStorage` 구현이 bool/문자열을 반환하면 B는 여전히 검증하지 않는다. Phase 1 실제 경로는 C다.
 
-#### P4.3 zero-column / duplicate-column schema
+#### P4.3 zero-column / duplicate-column schema (C 반영 완료)
 
-- **현재:**
-  - zero-column schema + `SELECT *` → `SelectResult(columns=[], rows=[])` (명시적 `columns=[]`는 `SchemaError`지만 `None` 경로는 통과).
-  - 중복 컬럼 이름 schema → `by_name` dict와 `_build_row` dict에서 뒤 값이 앞 값을 덮어씀. 예: `[id, name, name]`에 INSERT하면 첫 `name`이 사라질 수 있음.
-- **문제:** 스키마 불변식이 없으면 빈 결과/데이터 손실이 조용히 발생한다.
-- **선택지와 트레이드오프:**
-  1. **C의 메타 검증**
-     - 컬럼이 1개 이상, 이름이 유일해야 한다고 강제. 실패 시 `SchemaError`/`StorageError`.
-     - 장점: 메타 검증이 C 한 곳. 모든 쿼리/INSERT가 `get_schema`를 거침.
-     - 단점: C 통합 테스트 필요. 스키마 불변식의 소유권을 C로 옮김.
-  2. **B의 스키마 검사**
-     - `execute_query` 시작 시 컬럼 수/이름 중복을 확인하고 `SchemaError`.
-     - 장점: B 단위 테스트로 보장. C에 덜 의존.
-     - 단점: B가 매 쿼리 schema를 순회. C와 중복 가능.
-  3. **현재 유지**
-     - 장점: 변경 없음.
-     - 단점: zero-column `SELECT *`가 빈 결과를 반환하고, 중복 컬럼 INSERT가 데이터를 조용히 잃을 수 있음.
-- **영향:** C/B 경계, 스키마 불변식, D13과의 관계, B/C 테스트 책임.
-- **상태:** 미정. C 담당/팀 합의 필요. P4.1/P4.2/P4.3을 한 번에 정할지, 별도로 정할지도 미정.
+- **C 반영:** `get_schema`/생성자가 `columns`가 비어 있지 않은 list인지, 컬럼 이름이 유일한지 확인한다. 위반 시 `StorageError`.
+- **B:** 현재 코드는 zero-column/중복 이름에 대한 추가 방어를 넣지 않았다. 방어 추가 여부는 미정이다.
+- **확인:** `columns: []` → `StorageError`; `[id, name, name]` → `StorageError`.
+- **남은 것:** 에러 클래스가 `SchemaError`가 아니라 `StorageError`다. 이 분류를 바꿀지는 별도 결정이다.
 
 ### P5. CSV INT/DATE 셀의 숫자 문자 집합 (확정 D19)
 
