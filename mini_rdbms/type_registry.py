@@ -152,6 +152,9 @@ class DefaultTypeRegistry:
             raise SchemaError(f"Unsupported column type: {type_name!r}")
         return self._handlers[type_name]
 
+    def supports(self, type_name: str) -> bool:
+        return type_name in self._handlers
+
     def validate(
         self, type_name: str, value: Any, *, nullable: bool = False
     ) -> Any:

@@ -7,6 +7,9 @@ from typing import Any, Protocol, runtime_checkable
 class TypeRegistry(Protocol):
     """Contract separating type validation, comparison, and CSV cell codec."""
 
+    def supports(self, type_name: str) -> bool:
+        """Return whether the registry supports this column type name."""
+
     def validate(self, type_name: str, value: Any, *, nullable: bool = False) -> Any:
         """Validate and normalize a value for type_name or raise TypeMismatchError."""
 

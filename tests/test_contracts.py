@@ -116,6 +116,9 @@ def test_table_storage_protocol_contract() -> None:
 class MockTypeRegistry:
     """Minimal mock implementation verifying TypeRegistry contract for Part C."""
 
+    def supports(self, type_name: str) -> bool:
+        return type_name in {"INT", "STRING", "DATE"}
+
     def validate(self, type_name: str, value: Any, *, nullable: bool = False) -> Any:
         return value
 
@@ -149,6 +152,9 @@ def test_type_registry_protocol_contract() -> None:
     registry = MockTypeRegistry()
 
     assert isinstance(registry, TypeRegistry)
+    assert registry.supports("INT") is True
+    assert registry.supports("FLOAT") is False
+    assert registry.supports("NULL") is False
     assert registry.validate("INT", 42) == 42
     assert registry.compare("INT", 42, "=", 42) is True
     assert registry.to_csv_cell("INT", None) == "NULL"

@@ -1,7 +1,9 @@
 """Part C CSV table storage."""
 
+import csv
 import json
 import os
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -68,8 +70,21 @@ class CsvTableStorage:
     def __init__(self, data_dir: Path | str, type_registry: TypeRegistry) -> None:
         self._data_dir = Path(data_dir)
         self._type_registry = type_registry
+        try:
+            metadata_paths = sorted(self._data_dir.glob("*.meta.json"))
+        except OSError as exc:
+            raise StorageError(f"Cannot list metadata: {self._data_dir}") from exc
+        for path in metadata_paths:
+            table_name = path.name.removesuffix(".meta.json")
+            metadata = self._read_metadata(table_name)
+            schema = self._schema_from_metadata(table_name, metadata)
+            rows = self._read_rows(table_name, schema)
+            minimum_next_id = max((row["id"] for row in rows), default=-1) + 1
+            if "next_id" not in metadata or metadata["next_id"] < minimum_next_id:
+                metadata["next_id"] = minimum_next_id
+                self._save_metadata(table_name, metadata)
 
-    def get_schema(self, table_name: str) -> TableSchema:
+    def _read_metadata(self, table_name: str) -> dict[str, Any]:
         path = self._data_dir / f"{table_name}.meta.json"
         try:
             with path.open(encoding="utf-8") as file:
@@ -78,7 +93,18 @@ class CsvTableStorage:
             raise SchemaError(f"Unknown table: {table_name}") from exc
         except (OSError, UnicodeError, ValueError) as exc:
             raise StorageError(f"Cannot read metadata: {path}") from exc
+        if not isinstance(metadata, dict):
+            raise StorageError(f"Metadata must be a JSON object: {path}")
+        if "next_id" in metadata:
+            next_id = metadata["next_id"]
+            if type(next_id) is not int or next_id < 0:
+                raise StorageError(f"next_id must be a nonnegative integer: {path}")
+        return metadata
 
+    def _schema_from_metadata(
+        self, table_name: str, metadata: dict[str, Any]
+    ) -> TableSchema:
+        path = self._data_dir / f"{table_name}.meta.json"
         try:
             if metadata["table_name"] != table_name:
                 raise ValueError("Metadata table name mismatch")
@@ -94,14 +120,63 @@ class CsvTableStorage:
                     or not isinstance(column.auto_increment, bool)
                 ):
                     raise ValueError("Malformed column definition")
+                if column.name == "id" and column.type_name != "INT":
+                    raise ValueError("id column must have type INT")
+                if column.name == "id" and column.nullable:
+                    raise ValueError("id column must not be nullable")
             if len({column.name for column in columns}) != len(columns):
                 raise ValueError("Duplicate metadata column")
         except (KeyError, TypeError, ValueError) as exc:
             raise StorageError(f"Invalid metadata: {path}") from exc
+        for column in columns:
+            if not self._type_registry.supports(column.type_name):
+                raise SchemaError(f"Unsupported column type: {column.type_name!r}")
         return TableSchema(table_name=table_name, columns=columns)
+
+    def _save_metadata(self, table_name: str, metadata: dict[str, Any]) -> None:
+        """Persist a complete JSON before publishing the updated reservation.
+
+        The temporary file shares the destination directory for atomic replace.
+        This is not a transaction spanning the metadata and CSV files.
+        """
+        path = self._data_dir / f"{table_name}.meta.json"
+        temporary_path = None
+        try:
+            contents = json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                dir=self._data_dir,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as file:
+                temporary_path = Path(file.name)
+                file.write(contents)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary_path, path)
+        except (OSError, UnicodeError) as exc:
+            raise StorageError(f"Cannot save metadata: {path}") from exc
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    # Preserve the original failure if cleanup is also denied.
+                    pass
+
+    def get_schema(self, table_name: str) -> TableSchema:
+        return self._schema_from_metadata(table_name, self._read_metadata(table_name))
 
     def read_rows(self, table_name: str) -> list[dict[str, Any]]:
         schema = self.get_schema(table_name)
+        return self._read_rows(table_name, schema)
+
+    def _read_rows(
+        self, table_name: str, schema: TableSchema
+    ) -> list[dict[str, Any]]:
         path = self._data_dir / f"{table_name}.csv"
         try:
             with path.open(encoding="utf-8", newline="") as file:
@@ -130,10 +205,14 @@ class CsvTableStorage:
         return rows
 
     def allocate_next_id(self, table_name: str) -> int:
-        # Phase 1 executes allocate -> append sequentially, in one process.
-        # Unstored allocations are intentionally not persisted.
-        rows = self.read_rows(table_name)
-        return max((row["id"] for row in rows), default=-1) + 1
+        metadata = self._read_metadata(table_name)
+        self._schema_from_metadata(table_name, metadata)
+        if "next_id" not in metadata:
+            raise StorageError(f"next_id is missing; reinitialize storage: {table_name}")
+        next_id = metadata["next_id"]
+        metadata["next_id"] = next_id + 1
+        self._save_metadata(table_name, metadata)
+        return next_id
 
     def append_row(self, table_name: str, row: dict[str, Any]) -> None:
         schema = self.get_schema(table_name)
@@ -144,19 +223,26 @@ class CsvTableStorage:
             raise SchemaError(
                 f"Row keys do not match schema: missing={missing}, extra={extra}"
             )
-        cells = [
-            self._type_registry.to_csv_cell(column.type_name, row[column.name])
-            for column in schema.columns
-        ]
-        record = ",".join(cells) + "\n"
         path = self._data_dir / f"{table_name}.csv"
         try:
             # r+ does not create a missing CSV. Phase 1 is single-process.
             # Existing files are created with a header and LF terminators.
             with path.open("r+", encoding="utf-8", newline="") as file:
+                # Header cells need no quoted flag or domain conversion. Read
+                # only the first CSV record; do not rescan existing data rows.
+                header = next(csv.reader(file, strict=True), None)
+                if header != names:
+                    raise StorageError(
+                        f"CSV header does not match schema: {table_name}"
+                    )
+                cells = [
+                    self._type_registry.to_csv_cell(column.type_name, row[column.name])
+                    for column in schema.columns
+                ]
+                record = ",".join(cells) + "\n"
                 file.seek(0, os.SEEK_END)
                 file.write(record)
                 file.flush()
                 os.fsync(file.fileno())
-        except (OSError, UnicodeError) as exc:
+        except (OSError, UnicodeError, csv.Error) as exc:
             raise StorageError(f"Cannot append CSV: {path}") from exc

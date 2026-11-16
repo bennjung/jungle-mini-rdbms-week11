@@ -28,12 +28,14 @@ flowchart TD
         CMP["registry.compare(type_name, left, op, right)"]
         TOCSV["registry.to_csv_cell(type_name, value) -> str"]
         FROMCSV["registry.from_csv_cell(type_name, raw, nullable, quoted)"]
+        SUPPORTS["registry.supports(type_name) -> bool"]
 
         EXEC -->|"INSERT 값 / WHERE 리터럴 검증"| VAL
         EXEC -->|"WHERE 일반 비교 (=, !=, <, >...)"| CMP
     end
 
     subgraph PartC["Part C: 스토리지 & 메타 (storage.py)"]
+        INIT["CsvTableStorage 생성: 직속 *.meta.json 탐색 + CSV 1회 검사"]
         GSCHEMA["storage.get_schema(table) -> TableSchema"]
         ALLOC["storage.allocate_next_id(table) -> int"]
         APPEND["storage.append_row(table, row) -> None"]
@@ -41,6 +43,8 @@ flowchart TD
         FILES[("data/<table>.meta.json\ndata/<table>.csv")]
 
         GSCHEMA <-->|"JSON 스키마 로드"| FILES
+        INIT <-->|"next_id 초기화 / 최대 ID 이하이면 복구"| FILES
+        ALLOC -->|"메타 next_id + 1 저장 후 기존 번호 반환 (CSV 순회 없음)"| FILES
         APPEND -->|"CSV 레코드 추가 + LF + flush + fsync"| FILES
         READ <-->|"CSV 해석: 셀 내용(raw), 따옴표 여부(quoted)"| FILES
     end
@@ -55,12 +59,13 @@ flowchart TD
 
     APPEND -->|"셀 직렬화 (DI)"| TOCSV
     READ -->|"셀 역직렬화 (DI)"| FROMCSV
+    GSCHEMA -->|"메타 컬럼 타입 지원 여부 검사 (DI)"| SUPPORTS
 ```
 
 ### 핵심 설계 경계
 1. **엔진과 출력 분리:** 실행기(B)는 ASCII 문자열을 직접 조립하지 않고 구조화된 결과(`SelectResult`, `InsertResult`)만 반환한다. CLI 출력 포맷팅은 포맷터(D)가 전담한다.
 2. **타입 핸들러 집중 (`TypeRegistry` 계약 + DI):** `INT`, `STRING`, `DATE`, `NULL`의 검증·CSV 직렬화/역직렬화·비교 연산은 `type_registry.py`(B) 한 곳에 모아 추후 타입 확장 시 파서·실행기·스토리지 수정을 최소화한다. 스토리지(C)는 `type_registry.py`를 직접 import하지 않고 공통 계약 `TypeRegistry`를 DI로 주입받는다.
-3. **`next_id` 추상화:** `allocate_next_id(table_name)` 뒤에 방식을 숨긴다. 현재 합의한 구현은 CSV 전체의 최대 `id` + 1이며, 빈 테이블은 `0`부터 시작한다. 단일 프로세스에서 발급 → 저장을 순차 실행한다. 저장 실패로 번호가 비어도 허용하며, 저장되지 않은 발급 번호를 영구 기억하지 않는다.
+3. **`next_id` 추상화:** `allocate_next_id(table_name)` 뒤에 방식을 숨긴다. 객체 생성 시 `data_dir` 직속 `*.meta.json`마다 CSV를 1회 읽고 메타의 `next_id > max(id)`를 검사한다. `next_id`가 없거나 최대 ID 이하이면 최대 ID + 1로 초기화/복구하며, 빈 테이블은 `0`부터 시작한다. 더 큰 번호는 유지한다. 이후 발급은 CSV를 순회하지 않고 메타 번호를 증가·저장한 뒤 기존 번호를 반환한다. CSV 행 저장 실패 시 증가한 메타 번호는 되돌리지 않는다.
 4. **패키지 충돌 방지:**
    - 표준 라이브러리 `types` 섀도잉을 막기 위해 B의 모듈명은 `type_registry.py`로 고정한다.
    - `mini_rdbms/__init__.py`는 공통 계약 심볼만 노출하며 통합 전까지 동결한다. 각 파트는 본인 모듈 경로에서 직접 import한다.
@@ -113,6 +118,7 @@ mini_rdbms/
 ```json
 {
   "table_name": "courses",
+  "next_id": 0,
   "columns": [
     {"name": "id", "type_name": "INT", "nullable": false, "auto_increment": true},
     {"name": "title", "type_name": "STRING", "nullable": false, "auto_increment": false},
@@ -122,6 +128,12 @@ mini_rdbms/
 }
 ```
   - `registrations` (`id`, `student_id`, `course_id`, `status`)와 `students` (`id`, `name`, `department`, `grade`)는 `id`만 `auto_increment: true`, 전 컬럼 `nullable: false`이다.
+  - C의 `get_schema()` 및 객체 생성 검사는 `id.type_name`이 `"INT"`가 아니거나 `id.nullable=True`이면 `StorageError`로 거부한다. 다른 컬럼의 nullable 허용은 유지하며, 자동 증가 컬럼 개수·임의 이름 컬럼의 조합 검사는 추가하지 않는다.
+  - 메타 구조·id 제약 검사를 끝낸 뒤 C는 모든 컬럼에 `TypeRegistry.supports(type_name)`를 호출한다. 지원 목록은 레지스트리의 타입 핸들러를 기준으로 하며 C에 중복 정의하지 않는다. `False`이면 `SchemaError`로 거부한다. 빈 테이블에서도 동일하게 검사하며, `"NULL"`은 지원 타입명이 아니다.
+  - `next_id`는 bool을 제외한 0 이상의 정수다. 문자열·불리언·음수·실수·null 등 잘못된 형식은 `StorageError`이며 자동 복구하지 않는다.
+  - 객체 생성은 직속 메타 파일만 대상으로 한다. CSV만 있는 파일 및 하위 디렉터리의 메타는 검사 대상이 아니다. 메타에 대응하는 CSV가 없으면 `StorageError`다.
+  - 메타 갱신은 같은 디렉터리 임시 파일에 UTF-8 JSON 전체 기록 → `flush()` → `fsync()` → 파일 닫기 → `os.replace()` 순서다. 다른 메타 필드는 보존하며, 교체 전 쓰기 실패 시 원본은 유지한다. 실패하면 `StorageError`, 발급 중이면 ID를 반환하지 않는다.
+  - 메타 교체와 CSV 추가는 하나의 트랜잭션이 아니다. 디렉터리 fsync를 통한 전원 장애 시 교체 내구성이나 여러 테이블 초기화의 원자성은 이번 계약에 추가하지 않는다.
 - **`.csv` 구조:**
   - 첫 줄은 반드시 컬럼 헤더 행(`id,title,capacity,open_date`)을 포함한다. 빈 테이블은 헤더 1줄만 존재한다.
   - `to_csv_cell`은 문자열을 항상 큰따옴표(`"..."`, 내부 `"`는 `""`)로 감싸고, `None`만 따옴표 없이 `NULL`로 직렬화한다.
@@ -129,7 +141,8 @@ mini_rdbms/
   - C가 CSV 바깥 큰따옴표 제거 및 내부 `""` → `"` 복원을 수행한다. `raw`는 복원된 셀 내용이고, `quoted`는 원래 셀의 따옴표 여부다. 예: `"a""b"` → `raw='a"b'`, `quoted=True`.
   - 문자열의 실제 개행은 따옴표 안에 저장하고 그대로 복원한다. 문자 두 개 `\`와 `n`을 개행으로 변환하지 않는다. CSV 레코드는 여러 물리적 줄에 걸칠 수 있다.
   - 메타 JSON과 CSV의 인코딩은 UTF-8이다. CSV는 `newline=""`로 열고 레코드마다 끝에 LF(`\n`)를 기록한다.
-  - `read_rows()`는 메타 컬럼 이름·순서와 CSV 헤더를 비교한다. `append_row()`에서 기존 CSV 헤더를 재검사하는 요구는 추가하지 않는다.
+  - `read_rows()`는 메타 컬럼 이름·순서와 CSV 헤더를 비교한다. 셀 개수가 같은지 확인한 후 스키마의 모든 컬럼명으로 딕셔너리를 구성하므로 반환 행에는 NULL 값을 가진 컬럼을 포함해 스키마의 키가 모두 존재한다.
+  - `append_row()`도 쓰기 전 기존 CSV 첫 레코드의 헤더 이름·순서·CSV 문법을 검사한다. 빈 파일·헤더 누락·불일치는 `StorageError`이며 CSV를 변경하지 않는다. 같은 파일 핸들에서 헤더 검사 후 셀 변환·파일 끝 기록을 수행하고 기존 데이터 행은 재검사하지 않는다.
 
 ---
 
@@ -165,6 +178,7 @@ class TableStorage(Protocol):
 ```python
 @runtime_checkable
 class TypeRegistry(Protocol):
+    def supports(self, type_name: str) -> bool: ...
     def validate(self, type_name: str, value: Any, *, nullable: bool = False) -> Any: ...
     def compare(self, type_name: str, left: Any, op: str, right: Any) -> bool: ...
     def to_csv_cell(self, type_name: str, value: Any) -> str: ...
@@ -225,6 +239,8 @@ def parse_queries(sql_text: str) -> Iterator[Query]:
 ```python
 class DefaultTypeRegistry:
     """TypeRegistry 구현체 (인자 없는 __init__)."""
+    def supports(self, type_name: str) -> bool:
+        # 실제 타입 핸들러 목록에 등록된 이름이면 True, 아니면 False.
     def validate(self, type_name: str, value: Any, *, nullable: bool = False) -> Any:
         # 강제 형변환 금지. DATE는 'YYYY-MM-DD' 엄격 검증 후 datetime.date 반환. 위반 시 TypeMismatchError.
     def compare(self, type_name: str, left: Any, op: str, right: Any) -> bool:
@@ -254,20 +270,29 @@ def execute_query(
 ### 5.3 Part C (`mini_rdbms/storage.py`)
 ```python
 class CsvTableStorage:
-    def __init__(self, data_dir: Path | str, type_registry: TypeRegistry) -> None: ...
+    def __init__(self, data_dir: Path | str, type_registry: TypeRegistry) -> None:
+        # 직속 *.meta.json에서 테이블명 추출, 스키마 검증 및 CSV 최초 1회 순회.
+        # next_id 없음/최대 ID 이하 -> max(id)+1 저장, 빈 테이블은 0.
+        # next_id가 더 크면 유지. 잘못된 next_id 형식 또는 복구 저장 실패는 StorageError.
     def get_schema(self, table_name: str) -> TableSchema:
         # 메타 JSON 없으면 SchemaError, 손상/읽기 I/O 실패 시 StorageError
+        # id.type_name != "INT" 또는 id.nullable=True면 StorageError.
+        # 구조/id 검사 후 supports=False인 컬럼은 SchemaError (빈 테이블 포함).
     def read_rows(self, table_name: str) -> list[dict[str, Any]]:
         # CSV 없으면 StorageError. 헤더 이름/순서, 셀 수, CSV 문법 검증.
         # C가 CSV 이스케이프 복원 후 from_csv_cell(raw, nullable=..., quoted=...) 호출.
-        # 전체 행 목록 반환. DATE=date, NULL=None. 헤더만 있으면 [].
+        # 전체 행 목록 반환. 스키마의 모든 키 보장. DATE=date, NULL=None. 헤더만 있으면 [].
     def allocate_next_id(self, table_name: str) -> int:
-        # CSV 전체 최대 id + 1, 빈 테이블 0. 재실행 시 CSV에서 다시 계산.
+        # 메타 next_id 읽기 -> next_id+1을 임시 파일 기록/flush/fsync/교체 -> 기존 번호 반환.
+        # CSV 재순회 없음. 저장 실패 시 StorageError, ID 반환 안 함.
     def append_row(self, table_name: str, row: dict[str, Any]) -> None:
         # 키 누락/추가면 SchemaError, 파일 변경 없음. 딕셔너리 키 순서는 무관.
+        # 같은 파일 핸들로 기존 헤더 이름/순서/문법 검사, 실패 시 StorageError·파일 불변.
+        # 기존 데이터 행은 재검사하지 않음.
         # 스키마 순서로 row[column.name] 접근 -> to_csv_cell 호출.
         # 반환된 셀을 쉼표로 연결 + LF -> 쓰기 -> flush() -> os.fsync().
         # CSV 없으면 StorageError, 자동 생성 안 함. 파일 I/O 실패도 StorageError.
+        # 발급 시 증가한 메타 next_id는 CSV 저장 실패 시에도 되돌리지 않음.
 ```
 
 Part C 테스트 계약·입력·검증 시점은 [phase1-storage-tests.md](phase1-storage-tests.md)를 따른다.

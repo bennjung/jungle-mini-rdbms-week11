@@ -13,6 +13,29 @@ def registry() -> DefaultTypeRegistry:
     return DefaultTypeRegistry()
 
 
+@pytest.mark.parametrize("type_name", ["INT", "STRING", "DATE"])
+def test_reg_sup01_supported_types(registry, type_name):
+    assert registry.supports(type_name) is True
+
+
+@pytest.mark.parametrize("type_name", ["FLOAT", "BOOLEAN", "NULL", "int", ""])
+def test_reg_sup02_unsupported_types(registry, type_name):
+    assert registry.supports(type_name) is False
+
+
+def test_contract_sup01_spy_supports():
+    from mini_rdbms import TypeRegistry
+    from tests.fakes import SpyTypeRegistry
+
+    registry = SpyTypeRegistry()
+    assert isinstance(registry, TypeRegistry)
+    assert registry.supports("INT") is True
+    assert registry.supports("NULL") is False
+    assert registry.calls == [
+        ("supports", ("INT",)), ("supports", ("NULL",)),
+    ]
+
+
 def csv_round_trip(
     registry: DefaultTypeRegistry,
     type_name: str,

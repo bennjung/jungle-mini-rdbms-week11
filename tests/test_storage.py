@@ -11,6 +11,7 @@ import pytest
 from mini_rdbms.errors import SchemaError, StorageError
 from mini_rdbms.models import ColumnSchema, TableSchema
 from mini_rdbms.storage import CsvTableStorage
+import mini_rdbms.storage as storage_module
 
 
 STUDENT_HEADER = "id,name,department,grade\n"
@@ -25,6 +26,11 @@ class RegistrySpy:
     def __init__(self):
         self.to_calls = []
         self.from_calls = []
+        self.support_calls = []
+
+    def supports(self, type_name):
+        self.support_calls.append(type_name)
+        return type_name in {"INT", "STRING", "DATE"}
 
     def validate(self, *args, **kwargs):
         raise AssertionError("C must not repeat B's input validation")
@@ -55,8 +61,7 @@ class RegistrySpy:
         return raw
 
 
-@pytest.fixture
-def env(tmp_path):
+def prepare_tables(tmp_path):
     for table, definitions, header in (
         ("students", [("id", "INT"), ("name", "STRING"),
                       ("department", "STRING"), ("grade", "INT")], STUDENT_HEADER),
@@ -72,8 +77,18 @@ def env(tmp_path):
             json.dumps({"table_name": table, "columns": columns}), encoding="utf-8"
         )
         (tmp_path / f"{table}.csv").write_bytes(header.encode("utf-8"))
-    registry = RegistrySpy()
-    return tmp_path, registry, CsvTableStorage(tmp_path, registry)
+
+
+@pytest.fixture
+def prepared(tmp_path):
+    prepare_tables(tmp_path)
+    return tmp_path, RegistrySpy()
+
+
+@pytest.fixture
+def env(prepared):
+    root, registry = prepared
+    return root, registry, CsvTableStorage(root, registry)
 
 
 def put_csv(root, text, table="students"):
@@ -214,10 +229,11 @@ def test_C_I01_first_id(env):
 
 @pytest.mark.parametrize("ids", [(0, 1, 3), (3, 0, 1)], ids=["C-I02", "C-I03"])
 def test_maximum_id(env, ids):
-    root, _, storage = env
+    root, registry, _ = env
     put_csv(root, STUDENT_HEADER + "".join(
         f'{i},"민수","컴퓨터공학",2\n' for i in ids
     ))
+    storage = CsvTableStorage(root, registry)
     assert storage.allocate_next_id("students") == 4
 
 
@@ -231,6 +247,7 @@ def test_C_I04_restart(env):
 
 def test_C_I05_independent_tables(env):
     _, _, storage = env
+    assert storage.allocate_next_id("students") == 0
     storage.append_row("students", ROW)
     assert storage.allocate_next_id("students") == 1
     assert storage.allocate_next_id("courses") == 0
@@ -302,6 +319,8 @@ def test_durable_write(env, monkeypatch, failure):
     handle = Mock()
     handle.__enter__ = Mock(return_value=handle)
     handle.__exit__ = Mock(return_value=False)
+    handle.__iter__ = Mock(return_value=iter([STUDENT_HEADER]))
+    handle.readline.return_value = STUDENT_HEADER
     handle.fileno.return_value = 123
 
     def event(name):
@@ -346,3 +365,437 @@ def test_C_RT02_date_null_roundtrip(env, day):
     row = {"id": 0, "title": "자료구조", "capacity": 30, "open_date": day}
     storage.append_row("courses", row)
     assert storage.read_rows("courses") == [row]
+
+
+def read_meta(root, table="students"):
+    return json.loads((root / f"{table}.meta.json").read_text(encoding="utf-8"))
+
+
+def write_meta(root, metadata, table="students"):
+    (root / f"{table}.meta.json").write_text(
+        json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("type_name", ["STRING", "DATE"])
+def test_C_M01_initial_id_type(prepared, type_name):
+    root, registry = prepared
+    metadata = read_meta(root)
+    metadata["columns"][0]["type_name"] = type_name
+    write_meta(root, metadata)
+    before = (root / "students.meta.json").read_bytes()
+    with pytest.raises(StorageError):
+        CsvTableStorage(root, registry)
+    assert (root / "students.meta.json").read_bytes() == before
+    assert (root / "students.csv").read_bytes() == STUDENT_HEADER.encode()
+
+
+def test_C_M02_get_schema_id_type(env):
+    root, _, storage = env
+    metadata = read_meta(root)
+    metadata["columns"][0]["type_name"] = "STRING"
+    write_meta(root, metadata)
+    with pytest.raises(StorageError):
+        storage.get_schema("students")
+
+
+def test_C_M14_initial_nullable_id(prepared):
+    root, registry = prepared
+    metadata = read_meta(root)
+    metadata["columns"][0]["nullable"] = True
+    write_meta(root, metadata)
+    before = (root / "students.meta.json").read_bytes()
+    csv_before = (root / "students.csv").read_bytes()
+    with pytest.raises(StorageError):
+        CsvTableStorage(root, registry)
+    assert (root / "students.meta.json").read_bytes() == before
+    assert (root / "students.csv").read_bytes() == csv_before
+
+
+def test_C_M15_get_schema_nullable_id(env):
+    root, _, storage = env
+    metadata = read_meta(root)
+    metadata["columns"][0]["nullable"] = True
+    write_meta(root, metadata)
+    before = (root / "students.meta.json").read_bytes()
+    csv_before = (root / "students.csv").read_bytes()
+    with pytest.raises(StorageError):
+        storage.get_schema("students")
+    assert (root / "students.meta.json").read_bytes() == before
+    assert (root / "students.csv").read_bytes() == csv_before
+
+
+def test_C_M03_initialize_empty(prepared):
+    root, registry = prepared
+    before = read_meta(root)
+    CsvTableStorage(root, registry)
+    assert read_meta(root) == {**before, "next_id": 0}
+    assert (root / "students.csv").read_bytes() == STUDENT_HEADER.encode()
+
+
+@pytest.mark.parametrize("current,expected", [
+    ("missing", 3), (1, 3), (2, 3), (3, 3), (7, 7),
+])
+def test_C_M04_reconcile(prepared, current, expected):
+    root, registry = prepared
+    metadata = read_meta(root)
+    metadata["extra_note"] = "스키마 외 정보도 보존"
+    if current != "missing":
+        metadata["next_id"] = current
+    write_meta(root, metadata)
+    text = STUDENT_HEADER + "".join(
+        f'{i},"민수","컴퓨터공학",2\n' for i in range(3)
+    )
+    put_csv(root, text)
+    CsvTableStorage(root, registry)
+    assert read_meta(root) == {**metadata, "next_id": expected}
+    assert (root / "students.csv").read_bytes() == text.encode()
+
+
+@pytest.mark.parametrize("value", ["3", True, False, -1, 1.5, None, [], {}])
+def test_C_M05_invalid_next_id(prepared, value):
+    root, registry = prepared
+    metadata = {**read_meta(root), "next_id": value}
+    write_meta(root, metadata)
+    before = (root / "students.meta.json").read_bytes()
+    with pytest.raises(StorageError):
+        CsvTableStorage(root, registry)
+    assert (root / "students.meta.json").read_bytes() == before
+
+
+def test_C_M06_missing_csv_on_start(prepared):
+    root, registry = prepared
+    path = root / "courses.csv"
+    path.unlink()
+    with pytest.raises(StorageError):
+        CsvTableStorage(root, registry)
+    assert not path.exists()
+
+
+def test_C_M07_discover_and_scan_once(prepared, monkeypatch):
+    root, registry = prepared
+    for table in ("students", "courses"):
+        write_meta(root, {**read_meta(root, table), "next_id": 0}, table)
+    nested = root / "nested"
+    nested.mkdir()
+    (nested / "ignored.meta.json").write_text("{", encoding="utf-8")
+    (root / "orphan.csv").write_text("not a table", encoding="utf-8")
+    original = Path.open
+    csv_opens = []
+
+    def observe(path, *args, **kwargs):
+        if path.suffix == ".csv":
+            csv_opens.append(path.name)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observe)
+    CsvTableStorage(root, registry)
+    assert sorted(csv_opens) == ["courses.csv", "students.csv"]
+
+
+def test_C_M08_allocate_without_csv(env, monkeypatch):
+    root, _, storage = env
+    write_meta(root, {**read_meta(root), "next_id": 3})
+    original = Path.open
+
+    def disallow_csv(path, *args, **kwargs):
+        assert path.suffix != ".csv", "allocation must not rescan CSV"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", disallow_csv)
+    assert storage.allocate_next_id("students") == 3
+    assert storage.allocate_next_id("students") == 4
+    assert read_meta(root)["next_id"] == 5
+
+
+def test_C_M09_reserved_id_survives_restart(env):
+    root, registry, storage = env
+    assert storage.allocate_next_id("students") == 0
+    assert read_meta(root)["next_id"] == 1
+    restarted = CsvTableStorage(root, registry)
+    assert restarted.allocate_next_id("students") == 1
+    assert (root / "students.csv").read_bytes() == STUDENT_HEADER.encode()
+
+
+def test_C_M10_append_failure_keeps_reservation(env, monkeypatch):
+    root, registry, storage = env
+    assert storage.allocate_next_id("students") == 0
+    original = Path.open
+
+    def fail_csv_write(path, *args, **kwargs):
+        if path.name == "students.csv":
+            raise OSError("injected append failure")
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "open", fail_csv_write)
+        with pytest.raises(StorageError):
+            storage.append_row("students", ROW)
+    assert read_meta(root)["next_id"] == 1
+    restarted = CsvTableStorage(root, registry)
+    assert restarted.allocate_next_id("students") == 1
+
+
+@pytest.mark.parametrize("failure", ["write", "flush", "fsync", "replace"])
+def test_C_M11_atomic_save_failure(env, monkeypatch, failure):
+    root, _, storage = env
+    metadata = {**read_meta(root), "next_id": 3}
+    write_meta(root, metadata)
+    before = (root / "students.meta.json").read_bytes()
+    original_temporary = storage_module.tempfile.NamedTemporaryFile
+
+    class FailingTemporary:
+        def __init__(self, *args, **kwargs):
+            self.file = original_temporary(*args, **kwargs)
+            self.name = self.file.name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.file.close()
+
+        def write(self, text):
+            if failure == "write":
+                raise OSError("injected metadata write failure")
+            return self.file.write(text)
+
+        def flush(self):
+            if failure == "flush":
+                raise OSError("injected metadata flush failure")
+            return self.file.flush()
+
+        def fileno(self):
+            return self.file.fileno()
+
+    monkeypatch.setattr(storage_module.tempfile, "NamedTemporaryFile", FailingTemporary)
+    if failure == "fsync":
+        monkeypatch.setattr(os, "fsync", Mock(side_effect=OSError("fsync failed")))
+    if failure == "replace":
+        monkeypatch.setattr(os, "replace", Mock(side_effect=OSError("replace failed")))
+    with pytest.raises(StorageError):
+        storage.allocate_next_id("students")
+    assert (root / "students.meta.json").read_bytes() == before
+    assert (root / "students.csv").read_bytes() == STUDENT_HEADER.encode()
+    assert sorted(path.name for path in root.iterdir()) == [
+        "courses.csv", "courses.meta.json", "students.csv", "students.meta.json",
+    ]
+
+
+def test_C_M12_save_before_return(env, monkeypatch):
+    root, _, storage = env
+    metadata = {**read_meta(root), "next_id": 3}
+    write_meta(root, metadata)
+    events = []
+    original_temporary = storage_module.tempfile.NamedTemporaryFile
+    original_fsync = os.fsync
+    original_replace = os.replace
+
+    class ObservedTemporary:
+        def __init__(self, *args, **kwargs):
+            self.file = original_temporary(*args, **kwargs)
+            self.name = self.file.name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.file.close()
+
+        def write(self, text):
+            events.append("write")
+            return self.file.write(text)
+
+        def flush(self):
+            events.append("flush")
+            return self.file.flush()
+
+        def fileno(self):
+            return self.file.fileno()
+
+    def fsync(fd):
+        events.append("fsync")
+        original_fsync(fd)
+
+    def replace(source, destination):
+        events.append("replace")
+        assert Path(source).parent == root
+        assert read_meta(root)["next_id"] == 3
+        assert json.loads(Path(source).read_text(encoding="utf-8")) == {
+            **metadata, "next_id": 4,
+        }
+        original_replace(source, destination)
+
+    monkeypatch.setattr(storage_module.tempfile, "NamedTemporaryFile", ObservedTemporary)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    assert storage.allocate_next_id("students") == 3
+    assert read_meta(root) == {**metadata, "next_id": 4}
+    assert events == ["write", "flush", "fsync", "replace"]
+
+
+def test_C_M13_repair_failure(prepared, monkeypatch):
+    root, registry = prepared
+    write_meta(root, {**read_meta(root, "courses"), "next_id": 0}, "courses")
+    write_meta(root, {**read_meta(root), "next_id": 1})
+    text = STUDENT_HEADER + '2,"민수","컴퓨터공학",2\n'
+    put_csv(root, text)
+    before = (root / "students.meta.json").read_bytes()
+    monkeypatch.setattr(os, "replace", Mock(side_effect=OSError("repair failed")))
+    with pytest.raises(StorageError):
+        CsvTableStorage(root, registry)
+    assert (root / "students.meta.json").read_bytes() == before
+    assert (root / "students.csv").read_bytes() == text.encode()
+
+
+@pytest.mark.parametrize("type_name", ["FLOAT", "NULL"])
+def test_C_SUP01_initial_unsupported_type(prepared, type_name):
+    root, registry = prepared
+    metadata = read_meta(root)
+    metadata["columns"][-1]["type_name"] = type_name
+    write_meta(root, metadata)
+    before = (root / "students.meta.json").read_bytes()
+    with pytest.raises(SchemaError):
+        CsvTableStorage(root, registry)
+    assert (root / "students.meta.json").read_bytes() == before
+    assert (root / "students.csv").read_bytes() == STUDENT_HEADER.encode()
+
+
+@pytest.mark.parametrize("type_name", ["FLOAT", "NULL"])
+def test_C_SUP02_get_schema_unsupported_type(env, type_name):
+    root, _, storage = env
+    metadata = read_meta(root)
+    metadata["columns"][-1]["type_name"] = type_name
+    write_meta(root, metadata)
+    before = (root / "students.meta.json").read_bytes()
+    with pytest.raises(SchemaError):
+        storage.get_schema("students")
+    assert (root / "students.meta.json").read_bytes() == before
+    assert (root / "students.csv").read_bytes() == STUDENT_HEADER.encode()
+
+
+def test_C_SUP03_registry_is_source_of_support(env, monkeypatch):
+    _, registry, storage = env
+    supports = Mock(side_effect=lambda name: name != "STRING")
+    monkeypatch.setattr(registry, "supports", supports)
+    with pytest.raises(SchemaError):
+        storage.get_schema("students")
+    supports.assert_any_call("STRING")
+
+
+def test_C_SUP04_id_validation_precedes_support(env, monkeypatch):
+    root, registry, storage = env
+    metadata = read_meta(root)
+    metadata["columns"][0]["type_name"] = "FLOAT"
+    write_meta(root, metadata)
+    supports = Mock(return_value=False)
+    monkeypatch.setattr(registry, "supports", supports)
+    with pytest.raises(StorageError):
+        storage.get_schema("students")
+    supports.assert_not_called()
+
+
+def test_C_KEY01_complete_row_keys(env):
+    root, _, storage = env
+    put_csv(root, STUDENT_HEADER + RECORD)
+    put_csv(root, COURSE_HEADER + '0,"자료구조",30,NULL\n', "courses")
+    for table in ("students", "courses"):
+        names = {column.name for column in storage.get_schema(table).columns}
+        rows = storage.read_rows(table)
+        assert len(rows) == 1
+        assert set(rows[0]) == names
+    assert "open_date" in storage.read_rows("courses")[0]
+    assert storage.read_rows("courses")[0]["open_date"] is None
+
+
+@pytest.mark.parametrize("text", [
+    "id,other,department,grade\n" + RECORD,
+    "id,department,name,grade\n" + RECORD,
+    "",
+    RECORD,
+    'id,"name,department,grade\n',
+    'id,"name"x,department,grade\n',
+])
+def test_C_H01_append_rejects_bad_header(env, text):
+    root, registry, storage = env
+    put_csv(root, text)
+    before = (root / "students.csv").read_bytes()
+    with pytest.raises(StorageError):
+        storage.append_row("students", ROW)
+    assert (root / "students.csv").read_bytes() == before
+    assert registry.to_calls == []
+
+
+def test_C_H02_append_reads_only_header(env, monkeypatch):
+    root, _, storage = env
+    put_csv(root, STUDENT_HEADER + "broken\n")
+    original = Path.open
+    handles = []
+
+    class HeaderOnlyFile:
+        def __init__(self, file):
+            self.file = file
+            self.header_reads = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.file.close()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.header_reads += 1
+            assert self.header_reads == 1, "must not read existing data records"
+            return next(self.file)
+
+        def read(self, *args):
+            raise AssertionError("must not read the entire CSV")
+
+        def readline(self, *args):
+            return next(self)
+
+        def __getattr__(self, name):
+            return getattr(self.file, name)
+
+    def observe(path, *args, **kwargs):
+        file = original(path, *args, **kwargs)
+        if path.name == "students.csv":
+            handle = HeaderOnlyFile(file)
+            handles.append(handle)
+            return handle
+        return file
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "open", observe)
+        storage.append_row("students", ROW)
+    assert len(handles) == 1
+    assert handles[0].header_reads == 1
+    assert (root / "students.csv").read_bytes() == (
+        STUDENT_HEADER + "broken\n" + RECORD
+    ).encode()
+
+
+def test_C_H03_header_read_io_failure(env, monkeypatch):
+    root, _, storage = env
+    before = (root / "students.csv").read_bytes()
+    original = Path.open
+    handle = Mock()
+    handle.__enter__ = Mock(return_value=handle)
+    handle.__exit__ = Mock(return_value=False)
+    handle.__iter__ = Mock(side_effect=OSError("header read failed"))
+    handle.readline.side_effect = OSError("header read failed")
+
+    def fail_header_read(path, *args, **kwargs):
+        if path.name == "students.csv":
+            return handle
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "open", fail_header_read)
+        with pytest.raises(StorageError):
+            storage.append_row("students", ROW)
+    handle.write.assert_not_called()
+    assert (root / "students.csv").read_bytes() == before

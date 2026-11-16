@@ -154,6 +154,10 @@ class SpyTypeRegistry:
         if self.call_log is not None:
             self.call_log.append(("registry", method, args))
 
+    def supports(self, type_name: str) -> bool:
+        self._record("supports", type_name)
+        return self.inner.supports(type_name)
+
     def validate(
         self, type_name: str, value: Any, *, nullable: bool = False
     ) -> Any:
