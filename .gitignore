@@ -2,6 +2,9 @@
 .DS_Store
 
 # Dependencies and build output
+__pycache__/
+*.py[cod]
+.pytest_cache/
 
 # Local environment variables
 .env
