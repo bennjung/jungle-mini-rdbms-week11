@@ -17,6 +17,11 @@ class TypeRegistry(Protocol):
         """Serialize a typed Python value into its CSV cell representation."""
 
     def from_csv_cell(
-        self, type_name: str, raw: str, *, nullable: bool = False
+        self,
+        type_name: str,
+        raw: str,
+        *,
+        nullable: bool = False,
+        quoted: bool = False,
     ) -> Any:
-        """Deserialize a CSV cell string into a typed Python value."""
+        """Deserialize a CSV cell string (with quoted flag) into a typed Python value."""

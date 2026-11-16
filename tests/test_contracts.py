@@ -123,12 +123,24 @@ class MockTypeRegistry:
         return left == right
 
     def to_csv_cell(self, type_name: str, value: Any) -> str:
-        return "NULL" if value is None else str(value)
+        if value is None:
+            return "NULL"
+        if type_name == "STRING":
+            escaped = str(value).replace('"', '""')
+            return f'"{escaped}"'
+        return str(value)
 
     def from_csv_cell(
-        self, type_name: str, raw: str, *, nullable: bool = False
+        self,
+        type_name: str,
+        raw: str,
+        *,
+        nullable: bool = False,
+        quoted: bool = False,
     ) -> Any:
-        if nullable and raw == "NULL":
+        if not quoted and raw == "NULL":
+            if not nullable:
+                raise StorageError("Unexpected NULL for non-nullable column")
             return None
         return int(raw) if type_name == "INT" else raw
 
@@ -140,5 +152,7 @@ def test_type_registry_protocol_contract() -> None:
     assert registry.validate("INT", 42) == 42
     assert registry.compare("INT", 42, "=", 42) is True
     assert registry.to_csv_cell("INT", None) == "NULL"
+    assert registry.to_csv_cell("STRING", "NULL") == '"NULL"'
     assert registry.from_csv_cell("INT", "42") == 42
-    assert registry.from_csv_cell("DATE", "NULL", nullable=True) is None
+    assert registry.from_csv_cell("DATE", "NULL", nullable=True, quoted=False) is None
+    assert registry.from_csv_cell("STRING", "NULL", nullable=False, quoted=True) == "NULL"
