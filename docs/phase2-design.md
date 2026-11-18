@@ -553,7 +553,7 @@ append_row(table, row):
 
 ## 8. 테스트 계약 (확정)
 
-테스트 파일은 `tests/test_bplus_tree.py`(신규), `tests/test_storage.py`·`tests/test_executor.py`(추가), `tests/test_persistence.py`(기능 테스트)다. 구조 단언(T-04~T-07)은 `tree.root`로 노드에 직접 접근한다. 실행기 테스트(E-IDX-)는 `tests/fakes.py`의 `FakeStorage`에 `find_by_id` / `find_by_id_range`를 추가해 사용한다.
+테스트 파일은 `tests/test_bplus_tree.py`(신규), `tests/test_storage.py`·`tests/test_executor.py`(추가), `tests/test_persistence.py`(기능 테스트), `tests/test_benchmark_cli.py`(벤치마크 CLI)다. 구조 단언(T-04~T-07)은 `tree.root`로 노드에 직접 접근한다. 실행기 테스트(E-IDX-)는 `tests/fakes.py`의 `FakeStorage`에 `find_by_id` / `find_by_id_range`를 추가해 사용한다.
 
 > **문서 위치 이탈 기록.** 요구사항 §8은 테스트 계약을 `docs/phase2-tests.md`로 분리하도록 지정한다. 이번 설계 세션의 지시에 따라 설계 문서 §8에 통합했고, 사용자 승인을 받았다(D-20). 별도 문서가 필요해지면 §8 전체를 그대로 옮기면 된다.
 
