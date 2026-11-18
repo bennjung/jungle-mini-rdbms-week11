@@ -1,6 +1,6 @@
 {
   "table_name": "students",
-  "next_id": 0,
+  "next_id": 3,
   "columns": [
     {
       "name": "id",
