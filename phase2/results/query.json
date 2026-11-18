@@ -1,0 +1,116 @@
+{
+  "environment": {
+    "python": "3.14.10",
+    "platform": "Linux-7.3.4-1-cachyos-bore-x86_64-with-glibc2.44",
+    "cpu_count": 16,
+    "total_memory_bytes": 32252399616,
+    "cwd": "/home/chan/toy_project/jungle-period/jungle-mini-rdbms-week11"
+  },
+  "data_dir": "/tmp/opencode/bench/data",
+  "index": {
+    "max_keys": 128,
+    "build_seconds": 5.539132075005909,
+    "csv_bytes": 27415181
+  },
+  "settings": {
+    "warmup": 2,
+    "repeat": 7
+  },
+  "scenarios": [
+    {
+      "name": "equality_index",
+      "path": "index",
+      "rows": 1,
+      "node_visits": 4,
+      "records_read": 1,
+      "runs_seconds": [
+        4.749200161313638e-05,
+        4.392999835545197e-05,
+        9.498499275650829e-05,
+        6.886399933137e-05,
+        4.0368002373725176e-05,
+        3.561899939086288e-05,
+        3.3244999940507114e-05
+      ],
+      "min_seconds": 3.3244999940507114e-05,
+      "median_seconds": 4.392999835545197e-05,
+      "p95_seconds": 9.498499275650829e-05
+    },
+    {
+      "name": "equality_linear",
+      "path": "linear",
+      "rows": 1,
+      "node_visits": 0,
+      "records_read": 1000000,
+      "runs_seconds": [
+        5.56727353700262,
+        5.679834727998241,
+        5.475840402999893,
+        5.493006441000034,
+        5.496782060006808,
+        5.535858612995071,
+        5.419202395001776
+      ],
+      "min_seconds": 5.419202395001776,
+      "median_seconds": 5.496782060006808,
+      "p95_seconds": 5.679834727998241
+    },
+    {
+      "name": "range_index",
+      "path": "range",
+      "rows": 100,
+      "node_visits": 6,
+      "records_read": 100,
+      "runs_seconds": [
+        0.002591885997389909,
+        0.0027307999989716336,
+        0.00250639899604721,
+        0.002581200002168771,
+        0.0025800119983614422,
+        0.002564577000157442,
+        0.0025253970015910454
+      ],
+      "min_seconds": 0.00250639899604721,
+      "median_seconds": 0.0025800119983614422,
+      "p95_seconds": 0.0027307999989716336
+    },
+    {
+      "name": "range_linear",
+      "path": "linear",
+      "rows": 100,
+      "node_visits": 0,
+      "records_read": 1000000,
+      "runs_seconds": [
+        5.545215726997412,
+        5.649693751001905,
+        5.632113327999832,
+        5.617356315000507,
+        5.670549915004813,
+        5.752655561998836,
+        5.715319584000099
+      ],
+      "min_seconds": 5.545215726997412,
+      "median_seconds": 5.649693751001905,
+      "p95_seconds": 5.752655561998836
+    },
+    {
+      "name": "full_scan",
+      "path": "full_scan",
+      "rows": 1000000,
+      "node_visits": 0,
+      "records_read": 1000000,
+      "runs_seconds": [
+        5.598533937998582,
+        5.592434564001451,
+        5.501914419000968,
+        5.648629114002688,
+        5.761061313001846,
+        5.89241806800419,
+        5.799036714000977
+      ],
+      "min_seconds": 5.501914419000968,
+      "median_seconds": 5.648629114002688,
+      "p95_seconds": 5.89241806800419
+    }
+  ]
+}
